@@ -26,7 +26,7 @@ RUN set -eux; \
     cd /tmp; \
     curl -fsSLo "$deb" "$base/lian-li-linux_${LIANLI_VERSION}%2Bdebian13_amd64.deb"; \
     curl -fsSLo SHA256SUMS "$base/SHA256SUMS"; \
-    grep " ${deb}\$" SHA256SUMS | sha256sum -c -; \
+    awk -v f="$deb" '$2 == f || $2 == "./" f' SHA256SUMS | grep . | sha256sum -c -; \
     apt-get update; \
     apt-get install -y --no-install-recommends "./$deb"; \
     rm -rf /var/lib/apt/lists/* /tmp/*
