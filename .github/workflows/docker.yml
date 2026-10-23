@@ -1,0 +1,47 @@
+name: Build image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      lianli_version:
+        description: Upstream lian-li-linux release (without the leading v)
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream version
+        id: version
+        run: |
+          v="${{ github.event.inputs.lianli_version }}"
+          if [ -z "$v" ]; then
+            v=$(grep -oP '^ARG LIANLI_VERSION=\K.*' Dockerfile)
+          fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: LIANLI_VERSION=${{ steps.version.outputs.value }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/lian-li-linux-unraid:latest
+            ghcr.io/${{ github.repository_owner }}/lian-li-linux-unraid:${{ steps.version.outputs.value }}
