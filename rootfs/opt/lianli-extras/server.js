@@ -52,9 +52,9 @@ function listMedia(dir) {
 
 function createApp({ daemon, engine, store, options }) {
   const page = path.join(__dirname, 'public', 'index.html');
-  const templates = buildTemplates(options.statsDir);
   const alertIds = new Set(Object.values(ALERT_TEMPLATES));
-  const screenTemplates = templates.filter((item) => !alertIds.has(item.id));
+  const screenTemplates = () => buildTemplates(options.statsDir, engine.getStats().volumes)
+    .filter((item) => !alertIds.has(item.id));
   const passwordHash = options.password
     ? crypto.createHash('sha256').update(options.password).digest()
     : null;
@@ -67,7 +67,7 @@ function createApp({ daemon, engine, store, options }) {
   };
 
   const knownTemplate = async (id) => {
-    if (screenTemplates.some((item) => item.id === id)) return true;
+    if (screenTemplates().some((item) => item.id === id)) return true;
     const stored = await daemon.request('GetLcdTemplates');
     return stored.some((item) => item.id === id && !alertIds.has(id));
   };
@@ -83,7 +83,7 @@ function createApp({ daemon, engine, store, options }) {
       settings: { schedules: store.data.schedules, alerts: store.data.alerts, screens: store.data.screens },
       status: engine.status(),
       media: listMedia(options.mediaDir),
-      templates: screenTemplates.map(({ id, name }) => ({ id, name })),
+      templates: screenTemplates().map(({ id, name }) => ({ id, name })),
     };
     try {
       const [info, devices, config, telemetry, capabilities] = await Promise.all([

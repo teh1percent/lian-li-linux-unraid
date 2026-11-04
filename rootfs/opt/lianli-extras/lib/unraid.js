@@ -19,6 +19,8 @@ const EMPTY_VALUES = {
   disks_total: 0,
   disk_errors: 0,
   disks_bad: 0,
+  storage_used_pct: 0,
+  storage_free_tb: 0,
   array_used_pct: 0,
   array_free_tb: 0,
   cache_used_pct: 0,
@@ -56,6 +58,28 @@ function round(value, places = 1) {
   return Math.round(value * factor) / factor;
 }
 
+const usedPct = ({ size, free }) => (size > 0 ? ((size - free) / size) * 100 : 0);
+
+// Names become file names in sensor commands, which the daemon runs as shell.
+const volumeKey = (name) => String(name).toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+
+// Members of a pool are named after it (tank, tank2, tank3). They describe one
+// filesystem, so a pool counts once, using the member that reports its size.
+function poolsOf(disks) {
+  const pools = new Map();
+  for (const disk of disks) {
+    if (disk.type !== 'Cache') continue;
+    const name = (disk.name || disk.id).replace(/~.*$/, '').replace(/\d+$/, '');
+    const pool = pools.get(name) || { name, size: 0, free: 0 };
+    if (number(disk.fsSize) > pool.size) {
+      pool.size = number(disk.fsSize);
+      pool.free = number(disk.fsFree);
+    }
+    pools.set(name, pool);
+  }
+  return [...pools.values()].filter((pool) => pool.size > 0);
+}
+
 function computeStats(disksText, varText) {
   const disks = Object.entries(parseIni(disksText).sections)
     .map(([id, disk]) => ({ id, ...disk }))
@@ -65,14 +89,15 @@ function computeStats(disksText, varText) {
   const temps = disks.map((disk) => Number(disk.temp)).filter((temp) => Number.isFinite(temp) && temp > 0);
   const bad = disks.filter((disk) => BAD_STATUS.has(disk.status) || (disk.color || '').startsWith('red'));
   const errors = disks.reduce((sum, disk) => sum + number(disk.numErrors), 0);
-  const usage = (type) => {
-    const list = disks.filter((disk) => disk.type === type && number(disk.fsSize) > 0);
-    const size = list.reduce((sum, disk) => sum + number(disk.fsSize), 0);
-    const free = list.reduce((sum, disk) => sum + number(disk.fsFree), 0);
-    return { size, free, pct: size > 0 ? ((size - free) / size) * 100 : 0 };
-  };
-  const data = usage('Data');
-  const cache = usage('Cache');
+  const total = (list) => ({
+    size: list.reduce((sum, item) => sum + number(item.fsSize ?? item.size), 0),
+    free: list.reduce((sum, item) => sum + number(item.fsFree ?? item.free), 0),
+  });
+  const data = total(disks.filter((disk) => disk.type === 'Data' && number(disk.fsSize) > 0));
+  const pools = poolsOf(disks);
+  const cache = total(pools);
+  const volumes = data.size > 0 ? [{ name: 'Array', ...data }, ...pools] : pools;
+  const storage = total(volumes);
   const syncSize = number(vars.mdResyncSize) || number(vars.mdResync);
   const syncPos = number(vars.mdResyncPos);
 
@@ -84,14 +109,28 @@ function computeStats(disksText, varText) {
       disks_total: disks.length,
       disk_errors: errors,
       disks_bad: bad.length,
-      array_used_pct: round(data.pct),
+      storage_used_pct: round(usedPct(storage)),
+      storage_free_tb: round(storage.free / KB_PER_TB),
+      array_used_pct: round(usedPct(data)),
       array_free_tb: round(data.free / KB_PER_TB),
-      cache_used_pct: round(cache.pct),
+      cache_used_pct: round(usedPct(cache)),
       parity_errors: number(vars.sbSyncErrs),
       sync_pct: syncPos > 0 && syncSize > 0 ? round((syncPos / syncSize) * 100) : 0,
       array_started: vars.mdState === 'STARTED' ? 1 : 0,
+      ...Object.fromEntries(volumes.flatMap((volume) => [
+        [`volume_${volumeKey(volume.name)}_used_pct`, round(usedPct(volume))],
+        [`volume_${volumeKey(volume.name)}_free_tb`, round(volume.free / KB_PER_TB)],
+      ])),
     },
     hasTemps: temps.length > 0,
+    hasArray: disks.some((disk) => disk.type === 'Data' || disk.type === 'Parity'),
+    volumes: volumes.map((volume) => ({
+      name: volume.name,
+      key: volumeKey(volume.name),
+      usedPct: round(usedPct(volume)),
+      freeTb: round(volume.free / KB_PER_TB),
+      sizeTb: round(volume.size / KB_PER_TB),
+    })),
     disks: disks.map((disk) => ({
       name: disk.name || disk.id,
       type: disk.type,
@@ -114,6 +153,8 @@ function readStats(emhttpDir) {
       error: `Cannot read Unraid state in ${emhttpDir}: ${error.code || error.message}`,
       values: { ...EMPTY_VALUES },
       hasTemps: false,
+      hasArray: false,
+      volumes: [],
       disks: [],
       arrayState: 'UNKNOWN',
     };

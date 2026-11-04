@@ -63,9 +63,30 @@ test('stats use only present array drives and skip sleeping ones', () => {
   assert.strictEqual(values.disks_total, 4);
   assert.strictEqual(values.array_used_pct, 75);
   assert.strictEqual(values.cache_used_pct, 25);
+  // 9.25 of 13 used across the array and the cache pool.
+  assert.strictEqual(values.storage_used_pct, 71.2);
   assert.strictEqual(values.sync_pct, 0);
   assert.strictEqual(values.array_started, 1);
   assert.ok(!disks.some((disk) => disk.name === 'flash' || disk.name === 'disk3'));
+});
+
+test('ZFS pools count once each, however their members report size', () => {
+  const member = (name, sizes, temp = '30') => `["${name}"]\nname="${name}"\ndevice="sd${name}"\nstatus="DISK_OK"\ntemp="${temp}"\nnumErrors="0"\n${sizes}type="Cache"\ncolor="green-on"\n`;
+  const whole = 'fsSize="1000"\nfsFree="400"\n';
+  const disks = [
+    // Only the first member reports the filesystem.
+    member('tank', whole), member('tank2', ''), member('tank3', 'fsSize="0"\nfsFree="0"\n'),
+    // Every member reports the same filesystem.
+    member('fast', 'fsSize="3000"\nfsFree="3000"\n'), member('fast2', 'fsSize="3000"\nfsFree="3000"\n'),
+    // A special vdev belongs to its pool.
+    member('tank~special', ''),
+  ].join('');
+  const { values, volumes, hasArray } = computeStats(disks, 'mdState="STARTED"\n');
+  assert.strictEqual(hasArray, false);
+  assert.deepStrictEqual(volumes.map((volume) => [volume.name, volume.usedPct]), [['tank', 60], ['fast', 0]]);
+  assert.strictEqual(values.storage_used_pct, 15);
+  assert.strictEqual(values.array_used_pct, 0);
+  assert.strictEqual(values.disks_total, 6);
 });
 
 test('stats detect a parity check, parity errors and failed disks', () => {
@@ -92,13 +113,14 @@ test('stat files hold a single number that a sensor command can parse', () => {
 });
 
 test('templates respect limits the daemon validates and read only stat files', () => {
-  for (const template of buildTemplates('/run/lianli-stats')) {
+  const hostile = computeStats('["a;rm -rf"]\nname="a;rm -rf"\ndevice="sdx"\nstatus="DISK_OK"\nfsSize="10"\nfsFree="5"\ntype="Cache"\n', '').volumes;
+  for (const template of buildTemplates('/run/lianli-stats', [...stats.volumes, ...hostile])) {
     assert.ok(template.id && template.name.trim());
     for (const widget of template.widgets) {
       assert.ok(widget.width > 0 && widget.height > 0, widget.id);
       if (widget.update_interval_ms) assert.ok(widget.update_interval_ms >= 100 && widget.update_interval_ms <= 10000);
       const source = widget.kind.source;
-      if (source?.type === 'command') assert.match(source.cmd, /^cat \/run\/lianli-stats\/[a-z_]+$/);
+      if (source?.type === 'command') assert.match(source.cmd, /^cat \/run\/lianli-stats\/[a-z0-9_-]+$/);
     }
   }
 });
@@ -122,7 +144,7 @@ test('templates install alongside user templates, once', async () => {
   assert.ok(mock.state.templates.some((item) => item.id === 'user_made'));
   assert.ok(mock.state.templates.some((item) => item.id === 'unraid_drives'));
   const writes = mock.state.writes.length;
-  engine.instance = null;
+  engine.installed = null;
   await engine.tick();
   assert.strictEqual(mock.state.writes.length, writes);
 });
@@ -139,6 +161,24 @@ test('each fan can show a different screen and unmanaged LCDs stay untouched', a
   const writes = mock.state.writes.length;
   await engine.tick();
   assert.strictEqual(mock.state.writes.length, writes, 'no writes when nothing changed');
+});
+
+test('a screen can show all storage or one pool, and new pools get a screen', async () => {
+  await engine.tick();
+  const state = await (await call('/api/state')).json();
+  const ids = state.templates.map((item) => item.id);
+  assert.ok(ids.includes('unraid_array'));
+  assert.ok(ids.includes('unraid_volume_cache'));
+  assert.ok(stats.values.volume_cache_used_pct === 25);
+  assert.strictEqual((await call('/api/screen', { device_id: LCD1, screen: { kind: 'template', templateId: 'unraid_volume_cache' } })).status, 200);
+  assert.strictEqual(entryFor(LCD1).template_id, 'unraid_volume_cache');
+  assert.strictEqual((await call('/api/screen', { device_id: 'usb:1-3', screen: { kind: 'template', templateId: 'unraid_array' } })).status, 200);
+  assert.strictEqual(entryFor('usb:1-3').template_id, 'unraid_array');
+
+  stats.volumes = [...stats.volumes, { name: 'tank', key: 'tank', usedPct: 10, freeTb: 9, sizeTb: 10 }];
+  await engine.tick();
+  assert.strictEqual(engine.lastError, null);
+  assert.ok(mock.state.templates.some((item) => item.id === 'unraid_volume_tank'));
 });
 
 test('media must come from the media folder', async () => {

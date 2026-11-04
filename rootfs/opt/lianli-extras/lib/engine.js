@@ -147,11 +147,15 @@ class Engine {
 
   async run() {
     const info = await this.daemon.request('GetDaemonInfo');
-    if (info.instance_id !== this.instance) {
-      await installTemplates(this.daemon, this.statsDir);
-      this.instance = info.instance_id;
-      this.brightness.clear();
+    if (info.instance_id !== this.instance) this.brightness.clear();
+    // Pool screens are generated, so a new pool needs installing too.
+    const { volumes = [] } = this.getStats();
+    const installed = JSON.stringify([info.instance_id, volumes.map((volume) => volume.key)]);
+    if (installed !== this.installed) {
+      await installTemplates(this.daemon, this.statsDir, volumes);
+      this.installed = installed;
     }
+    this.instance = info.instance_id;
     const [devices, config] = await Promise.all([
       this.daemon.request('ListDevices'),
       this.daemon.request('GetConfig'),

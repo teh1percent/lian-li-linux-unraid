@@ -142,11 +142,14 @@ function renderOverview() {
     html += `<div class="grid">
       <div class="stat">${hottest}<span>Hottest drive</span></div>
       <div class="stat"><b>${values.disks_active}/${values.disks_total}</b><span>Drives awake</span></div>
-      <div class="stat"><b>${values.array_used_pct}%</b><span>Array used, ${values.array_free_tb} TB free</span></div>
-      <div class="stat"><b>${values.cache_used_pct}%</b><span>Cache used</span></div>
-      <div class="stat"><b class="${values.parity_errors ? 'bad' : ''}">${values.parity_errors}</b><span>Parity errors</span></div>
-      <div class="stat"><b>${sync}</b><span>Parity check</span></div>
+      <div class="stat"><b>${values.storage_used_pct}%</b><span>Storage used</span></div>
+      <div class="stat"><b>${values.storage_free_tb}</b><span>TB free</span></div>
+      ${stats.hasArray ? `<div class="stat"><b class="${values.parity_errors ? 'bad' : ''}">${values.parity_errors}</b><span>Parity errors</span></div>
+      <div class="stat"><b>${sync}</b><span>Parity check</span></div>` : ''}
     </div>`;
+    if (stats.volumes.length) {
+      html += `<div class="card"><h2>Storage</h2>${stats.volumes.map((volume) => `<div class="row"><span>${esc(volume.name)}</span><span class="num">${volume.usedPct}% used, ${volume.freeTb} of ${volume.sizeTb} TB free</span></div>`).join('')}</div>`;
+    }
   }
   const fans = devices.filter((device) => device.hasFan);
   html += `<div class="card"><h2>Fans</h2>${fans.length ? fans.map((device) => {
@@ -250,7 +253,7 @@ function renderAuto() {
       <label class="check"><input type="checkbox" id="aOn" ${alerts.enabled ? 'checked' : ''}>Take over all screens when something is wrong</label>
       <label>Drive too hot at (°C)<input type="number" id="aTemp" min="30" max="70" value="${alerts.diskTempC}"></label>
       <label class="check"><input type="checkbox" id="aDisk" ${alerts.diskProblem ? 'checked' : ''}>Disabled disks or read errors</label>
-      <label class="check"><input type="checkbox" id="aParity" ${alerts.parityErrors ? 'checked' : ''}>Parity errors</label>
+      ${data.stats.hasArray ? `<label class="check"><input type="checkbox" id="aParity" ${alerts.parityErrors ? 'checked' : ''}>Parity errors</label>` : `<input type="checkbox" id="aParity" hidden ${alerts.parityErrors ? 'checked' : ''}>`}
       <div class="actions"><button class="btn primary" id="aSave">Save alerts</button></div>
     </div>
     <h2>Schedules</h2>

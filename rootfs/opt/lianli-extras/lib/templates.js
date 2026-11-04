@@ -51,9 +51,16 @@ function template(id, name, background, widgets) {
   return { id, name, base_width: 400, base_height: 400, rotated: false, target_device: null, background, widgets };
 }
 
-function buildTemplates(statsDir) {
+function buildTemplates(statsDir, volumes = []) {
   const stat = (key) => ({ type: 'command', cmd: `cat ${statsDir}/${key}` });
   const tempRanges = thresholds(40, 50);
+  const storage = (id, name, title, usedKey, freeKey) => template(id, name, BLACK, [
+    gauge(stat(usedKey), 0, 100, thresholds(75, 90)),
+    label('title', title, 84, 36),
+    value('used', stat(usedKey), 186, 120),
+    label('unit', '% used', 266, 26, { color: MUTED }),
+    value('free', stat(freeKey), 312, 26, { width: 200, unit: ' TB free', format: '{:.1}', color: MUTED }),
+  ]);
 
   return [
     template('unraid_drives', 'Unraid: Drives', BLACK, [
@@ -63,13 +70,10 @@ function buildTemplates(statsDir) {
       label('unit', 'hottest °C', 266, 26, { color: MUTED }),
       value('active', stat('disks_active'), 312, 26, { width: 160, unit: ' awake', color: MUTED }),
     ]),
-    template('unraid_array', 'Unraid: Array', BLACK, [
-      gauge(stat('array_used_pct'), 0, 100, thresholds(75, 90)),
-      label('title', 'ARRAY', 84, 36),
-      value('used', stat('array_used_pct'), 186, 120),
-      label('unit', '% used', 266, 26, { color: MUTED }),
-      value('free', stat('array_free_tb'), 312, 26, { width: 200, unit: ' TB free', format: '{:.1}', color: MUTED }),
-    ]),
+    storage('unraid_array', 'Unraid: All storage', 'STORAGE', 'storage_used_pct', 'storage_free_tb'),
+    ...volumes.map(({ name, key }) => storage(
+      `unraid_volume_${key}`, `Unraid: ${name}`, name.toUpperCase(), `volume_${key}_used_pct`, `volume_${key}_free_tb`,
+    )),
     template('unraid_system', 'Unraid: System', BLACK, [
       gauge({ type: 'cpu_usage' }, 0, 100, thresholds(50, 80)),
       label('title', 'CPU', 84, 36),
@@ -82,11 +86,11 @@ function buildTemplates(statsDir) {
       label('temp_l', 'Hottest', 126, 30, { x: 125, width: 150, color: MUTED, align: 'left' }),
       value('temp', stat('disk_temp_max'), 126, 42, { x: 280, width: 130, unit: '°', align: 'right', ranges: tempRanges, max: 65 }),
       label('used_l', 'Used', 190, 30, { x: 125, width: 150, color: MUTED, align: 'left' }),
-      value('used', stat('array_used_pct'), 190, 42, { x: 280, width: 130, unit: '%', align: 'right', ranges: thresholds(75, 90) }),
-      label('errors_l', 'Parity err', 254, 30, { x: 125, width: 150, color: MUTED, align: 'left' }),
-      value('errors', stat('parity_errors'), 254, 42, { x: 280, width: 130, align: 'right', max: 1000 }),
-      label('sync_l', 'Check', 318, 30, { x: 140, width: 110, color: MUTED, align: 'left' }),
-      value('sync', stat('sync_pct'), 318, 42, { x: 260, width: 120, unit: '%', align: 'right' }),
+      value('used', stat('storage_used_pct'), 190, 42, { x: 280, width: 130, unit: '%', align: 'right', ranges: thresholds(75, 90) }),
+      label('free_l', 'Free TB', 254, 30, { x: 125, width: 150, color: MUTED, align: 'left' }),
+      value('free', stat('storage_free_tb'), 254, 42, { x: 280, width: 130, format: '{:.1}', align: 'right', max: 100000 }),
+      label('awake_l', 'Awake', 318, 30, { x: 140, width: 110, color: MUTED, align: 'left' }),
+      value('awake', stat('disks_active'), 318, 42, { x: 260, width: 120, align: 'right', max: 1000 }),
     ]),
     template('unraid_alert_temp', 'Unraid alert: Drive hot', ALERT_RED, [
       label('title', 'DRIVE HOT', 112, 50),
@@ -121,8 +125,8 @@ function contains(stored, wanted) {
   return stored === wanted;
 }
 
-async function installTemplates(daemon, statsDir) {
-  const wanted = buildTemplates(statsDir);
+async function installTemplates(daemon, statsDir, volumes) {
+  const wanted = buildTemplates(statsDir, volumes);
   const current = await daemon.request('GetLcdTemplates');
   const originals = current.filter((item) => wanted.some((mine) => mine.id === item.id));
   const upToDate = wanted.every((mine) => contains(originals.find((item) => item.id === mine.id), mine));

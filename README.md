@@ -87,11 +87,13 @@ need the host's hwmon temperature sensors under `/sys`.
 
 Open `http://<server>:6090` on a phone or computer.
 
-- **Status:** hottest drive, array and cache usage, parity state, fan speeds.
+- **Status:** hottest drive, storage per pool and array, fan speeds, and parity
+  state if you have a classic array.
 - **Fans:** fixed speed (20% minimum here) or any curve made in the full app.
 - **Lights:** effect, colour and brightness per fan group, or all at once.
 - **Screens:** choose what each LCD shows: an Unraid screen or a file from the
-  LCD media folder. **Different stat on each fan** assigns them in turn.
+  LCD media folder. Storage can show everything together or one pool, and new
+  pools get a screen automatically. **Different stat on each fan** assigns them in turn.
 - **Automation:** schedules (screen brightness, optional screen swap) and alerts
   that take over every screen for a hot drive, a disk problem or parity errors.
   Muting lasts 24 hours. Schedules don't change fan speeds.
@@ -102,6 +104,8 @@ screen here is kept on that screen, so change it here rather than in the full ap
 
 Drive data comes from Unraid's own status files, so sleeping drives are never
 woken. When every drive is asleep, the LCD screens show the hottest drive as 0.
+Alerts use Unraid's per-disk status, so ZFS pool health and scrub results aren't
+included.
 
 The API only offers fixed operations with validated values. It can't set sensor
 commands, because the daemon runs those as shell. It still controls cooling, so
