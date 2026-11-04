@@ -627,6 +627,160 @@ test('settings saved by the previous version still load with new defaults', () =
   assert.deepStrictEqual(old.data.names, {});
 });
 
+const AIO = 'wireless:aa:bb:cc:dd:ee:ff';
+
+function addAio(overrides = {}) {
+  mock.state.extra.push({
+    device_id: AIO, family: 'WirelessAio', name: 'Galahad II', serial: 'aa:bb', has_lcd: false, has_fan: true,
+    has_pump: true, has_pump_control: true, has_rgb: false, fan_count: 3, rgb_zone_count: 0,
+    mb_sync_support: false, pump_mb_sync_support: false, is_unbound_wireless: false, ...overrides,
+  });
+  mock.state.telemetry.fan_rpms[AIO] = [900, 910, 905, 2100];
+  mock.state.telemetry.coolant_temps[AIO] = 34.5;
+  mock.state.sensors.push({ source: { type: 'wireless_coolant', device_id: AIO }, display_name: 'Galahad II (Coolant)', unit: 'C', current_value: 34.5 });
+}
+
+const aioSaved = () => mock.state.config.aio[AIO];
+const aioState = async () => (await (await call('/api/state')).json()).devices.find((device) => device.id === AIO);
+
+test('an AIO reports pump speed and coolant apart from its fans', async () => {
+  addAio();
+  const device = await aioState();
+  assert.strictEqual(device.isAio, true);
+  assert.deepStrictEqual(device.rpms, [900, 910, 905]);
+  assert.strictEqual(device.aio.pumpRpm, 2100);
+  assert.strictEqual(device.aio.coolant, 34.5);
+  assert.strictEqual(device.aio.pump, 'off');
+  const fan = (await (await call('/api/state')).json()).devices.find((item) => item.id === FAN);
+  assert.strictEqual(fan.isAio, false);
+  assert.strictEqual(fan.aio, null);
+});
+
+test('AIO speeds go to its own config section and keep the other settings', async () => {
+  addAio();
+  mock.state.config.aio = { [AIO]: { pump_target_rpm: 'off', fan_speeds: ['off', 'off', 'off', 'off'], brightness: 55, theme_index: 4 }, other: { brightness: 1 } };
+  assert.strictEqual((await call('/api/aio', { device_id: AIO, pump: { mode: 'constant', percent: 100 } })).status, 200);
+  assert.strictEqual(aioSaved().pump_target_rpm, 255);
+  assert.strictEqual((await call('/api/aio', { device_id: AIO, fans: { mode: 'curve', curve: 'Quiet' } })).status, 200);
+  assert.deepStrictEqual(aioSaved().fan_speeds, ['Quiet', 'Quiet', 'Quiet', 'off'], 'only slots the AIO has');
+  assert.strictEqual(aioSaved().brightness, 55);
+  assert.strictEqual(aioSaved().theme_index, 4);
+  assert.strictEqual(mock.state.config.aio.other.brightness, 1);
+  assert.deepStrictEqual(mock.state.config.fans.speeds, [], 'never written as a fan group');
+  assert.strictEqual((await call('/api/aio', { device_id: AIO, pump: { mode: 'auto' } })).status, 200);
+  assert.strictEqual(aioSaved().pump_target_rpm, 'off');
+});
+
+test('the pump and AIO fans cannot be stopped or misdirected', async () => {
+  addAio();
+  const send = (body) => call('/api/aio', { device_id: AIO, ...body });
+  assert.strictEqual((await send({ pump: { mode: 'constant', percent: 0 } })).status, 400);
+  assert.strictEqual((await send({ pump: { mode: 'constant', percent: 29 } })).status, 400);
+  assert.strictEqual((await send({ fans: { mode: 'constant', percent: 10 } })).status, 400);
+  assert.strictEqual((await send({ pump: { mode: 'curve', curve: 'off' } })).status, 400);
+  assert.strictEqual((await send({ pump: { mode: 'curve', curve: 'Nope' } })).status, 400);
+  assert.strictEqual((await send({ pump: 0 })).status, 400);
+  assert.strictEqual((await send({ pump: { mode: 'mb' } })).status, 400, 'not supported by this one');
+  assert.strictEqual((await call('/api/aio', { device_id: FAN, pump: { mode: 'auto' } })).status, 400, 'not an AIO');
+  assert.strictEqual((await call('/api/fan', { device_id: AIO, mode: 'constant', percent: 50 })).status, 400, 'belongs on the AIO page');
+  assert.strictEqual(mock.state.config.aio, undefined);
+});
+
+test('an AIO that is not paired cannot be set', async () => {
+  addAio({ is_unbound_wireless: true });
+  assert.strictEqual((await call('/api/aio', { device_id: AIO, pump: { mode: 'auto' } })).status, 400);
+});
+
+test('motherboard sync is offered only where the AIO supports it', async () => {
+  addAio({ pump_mb_sync_support: true });
+  assert.strictEqual((await call('/api/aio', { device_id: AIO, pump: { mode: 'mb' } })).status, 200);
+  assert.strictEqual(aioSaved().pump_target_rpm, '__mb_sync__');
+  assert.strictEqual((await call('/api/aio', { device_id: AIO, fans: { mode: 'mb' } })).status, 400);
+});
+
+test('the pump screen settings are checked and saved', async () => {
+  addAio();
+  const send = (body) => call('/api/aio', { device_id: AIO, ...body });
+  assert.strictEqual((await send({ brightness: 40, rotation: 2, theme: 12, loopInterval: 5, colors: { value: [1, 2, 3] } })).status, 200);
+  assert.strictEqual(aioSaved().brightness, 40);
+  assert.strictEqual(aioSaved().rotation, 2);
+  assert.strictEqual(aioSaved().theme_index, 12);
+  assert.strictEqual(aioSaved().loop_interval, 5);
+  assert.deepStrictEqual(aioSaved().val_color, [1, 2, 3, 255]);
+  assert.deepStrictEqual((await aioState()).aio.colors.value, [1, 2, 3]);
+  for (const bad of [{ brightness: 101 }, { rotation: 4 }, { theme: 13 }, { loopInterval: 0 }, { colors: { value: [999, 0, 0] } }]) {
+    assert.strictEqual((await send(bad)).status, 400, JSON.stringify(bad));
+  }
+});
+
+test('pump screen sensors come from the list and never take a command', async () => {
+  addAio();
+  const send = (sensors) => call('/api/aio', { device_id: AIO, sensors });
+  const hwmon = JSON.stringify({ type: 'hwmon', name: 'k10temp', label: 'Tctl', device_path: '/x' });
+  const state = await (await call('/api/state')).json();
+  assert.ok(state.aioSensors.some((sensor) => sensor.id === hwmon));
+  assert.ok(!state.aioSensors.some((sensor) => sensor.id.includes('command')));
+  assert.strictEqual((await send({ cpuTemp: hwmon })).status, 200);
+  assert.strictEqual(aioSaved().cpu_temp_source.type, 'hwmon');
+  assert.strictEqual((await send({ cpuTemp: null })).status, 200);
+  assert.strictEqual(aioSaved().cpu_temp_source, null);
+  assert.strictEqual((await send({ cpuTemp: JSON.stringify({ type: 'command', cmd: 'rm -rf /' }) })).status, 400);
+  assert.strictEqual((await send({ cpuTemp: { type: 'command', cmd: 'rm -rf /' } })).status, 400);
+  assert.strictEqual((await send({ temp_command: hwmon })).status, 400);
+});
+
+test('fan curves can follow coolant, and an AIO keeps its curve safe', async () => {
+  addAio();
+  const coolant = JSON.stringify({ type: 'wireless_coolant', device_id: AIO });
+  const state = await (await call('/api/state')).json();
+  assert.ok(state.sensors.some((sensor) => sensor.id === coolant));
+  const points = [[30, 40], [45, 100]];
+  assert.strictEqual((await call('/api/curve', { name: 'Loop', sensor: coolant, points })).status, 200);
+  assert.deepStrictEqual(mock.state.config.fan_curves.find((curve) => curve.name === 'Loop').temp_source, { type: 'wireless_coolant', device_id: AIO });
+  await call('/api/aio', { device_id: AIO, pump: { mode: 'curve', curve: 'Loop' }, fans: { mode: 'curve', curve: 'Loop' } });
+
+  assert.strictEqual((await call('/api/curve/delete', { name: 'Loop' })).status, 400);
+  assert.strictEqual((await call('/api/curve', { original: 'Loop', name: 'Coolant', sensor: coolant, points })).status, 200);
+  assert.strictEqual(aioSaved().pump_target_rpm, 'Coolant');
+  assert.deepStrictEqual(aioSaved().fan_speeds, ['Coolant', 'Coolant', 'Coolant', 'off']);
+});
+
+test('the coolant alert has a margin, stays quiet with no AIO and works without Unraid', () => {
+  store.data.alerts.enabled = true;
+  store.data.alerts.diskTempC = 70;
+  assert.strictEqual(engine.alert(), null, 'no AIO');
+  stats.coolantMax = 50;
+  assert.strictEqual(engine.alert(), 'coolant');
+  stats.coolantMax = 49;
+  assert.strictEqual(engine.alert(), 'coolant', 'inside the margin');
+  stats.coolantMax = 47;
+  assert.strictEqual(engine.alert(), null);
+  stats.coolantMax = 55;
+  stats.available = false;
+  assert.strictEqual(engine.alert(), 'coolant');
+  store.data.alerts.coolantHot = false;
+  assert.strictEqual(engine.alert(), null);
+  store.data.alerts.coolantHot = true;
+  stats.available = true;
+  stats.values.disks_bad = 1;
+  assert.strictEqual(engine.alert(), 'disk', 'a disk problem still ranks first');
+});
+
+test('the coolant alert takes over the screens, and its limit can be saved', async () => {
+  store.data.alerts.enabled = true;
+  stats.coolantMax = 60;
+  await engine.tick();
+  assert.strictEqual(engine.lastError, null);
+  assert.strictEqual(entryFor(LCD1).template_id, 'unraid_alert_coolant');
+  const body = { enabled: true, diskTempC: 50, diskProblem: true, parityErrors: true, storageFull: true, coolantHot: true };
+  assert.strictEqual((await call('/api/alerts', { ...body, coolantC: 25 })).status, 400);
+  assert.strictEqual((await call('/api/alerts', { ...body, coolantC: 65 })).status, 200);
+  assert.strictEqual(store.data.alerts.coolantC, 65);
+  assert.strictEqual(engine.alert(), null);
+  assert.strictEqual((await call('/api/alerts', { ...body, coolantHot: undefined })).status, 200);
+  assert.strictEqual(store.data.alerts.coolantHot, true, 'pages without the switch leave it alone');
+});
+
 test('password protection applies to everything when set', async () => {
   const locked = createApp({ daemon: engine.daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: dir, fullAppPort: 6081, password: 'secret' } });
   await listen(locked, 0);

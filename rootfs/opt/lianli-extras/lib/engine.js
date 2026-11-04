@@ -21,13 +21,14 @@ const ALERT_TEMPLATES = {
   parity: 'unraid_alert_parity',
   storage: 'unraid_alert_storage',
   temp: 'unraid_alert_temp',
+  coolant: 'unraid_alert_coolant',
 };
 
 const defaults = () => ({
   screens: {},
   storageVolume: 'all',
   schedules: [],
-  alerts: { enabled: false, diskTempC: 50, diskProblem: true, parityErrors: true, storageFull: true, storagePct: 90, muteUntil: 0 },
+  alerts: { enabled: false, diskTempC: 50, diskProblem: true, parityErrors: true, storageFull: true, storagePct: 90, coolantHot: true, coolantC: 50, muteUntil: 0 },
   theme: 'default',
   customColors: null,
   lcdThemes: {},
@@ -111,6 +112,7 @@ class Engine {
     this.getStats = getStats;
     this.now = now;
     this.tempAlert = false;
+    this.coolantAlert = false;
     this.lastError = null;
     this.instance = null;
     this.installed = null;
@@ -127,11 +129,15 @@ class Engine {
 
   alert() {
     const { alerts } = this.store.data;
-    const { values, available, hasTemps } = this.getStats();
+    const { values, available, hasTemps, coolantMax = 0 } = this.getStats();
     this.tempAlert = available && hasTemps && values.disk_temp_max >= alerts.diskTempC - (this.tempAlert ? TEMP_CLEAR_MARGIN : 0);
-    if (!alerts.enabled || !available) return null;
+    this.coolantAlert = coolantMax > 0 && coolantMax >= alerts.coolantC - (this.coolantAlert ? TEMP_CLEAR_MARGIN : 0);
+    if (!alerts.enabled) return null;
     if (alerts.muteUntil > this.now().getTime()) return null;
-    if (alerts.diskProblem && (values.disks_bad > 0 || values.disk_errors > 0)) return 'disk';
+    if (available && alerts.diskProblem && (values.disks_bad > 0 || values.disk_errors > 0)) return 'disk';
+    // AIO readings don't depend on Unraid's files, so this one works without them.
+    if (alerts.coolantHot && this.coolantAlert) return 'coolant';
+    if (!available) return null;
     if (alerts.parityErrors && values.parity_errors > 0) return 'parity';
     if (alerts.storageFull && values.volume_max_used_pct >= alerts.storagePct) return 'storage';
     return this.tempAlert ? 'temp' : null;

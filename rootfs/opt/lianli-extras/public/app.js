@@ -7,6 +7,7 @@ const ICONS = {
   screens: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
   auto: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   system: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+  aio: '<path d="M12 3s7 7.5 7 12a7 7 0 0 1-14 0c0-4.5 7-12 7-12z"/>',
   temp: '<path d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/>',
   disk: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h.01M11 15h6"/>',
   storage: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
@@ -15,13 +16,15 @@ const ICONS = {
 };
 const icon = (name) => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 
-const TABS = [['overview', 'Status'], ['fans', 'Fans'], ['lights', 'Lights'], ['screens', 'Screens'], ['auto', 'Auto'], ['system', 'System']];
+// The AIO tab only appears once an AIO is connected.
+const TABS = [['overview', 'Status'], ['fans', 'Fans'], ['aio', 'AIO'], ['lights', 'Lights'], ['screens', 'Screens'], ['auto', 'Auto'], ['system', 'System']];
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const ALERT_TEXT = { disk: 'Disk problem', parity: 'Parity errors', temp: 'Drive too hot', storage: 'Storage nearly full' };
+const ALERT_TEXT = { disk: 'Disk problem', parity: 'Parity errors', temp: 'Drive too hot', storage: 'Storage nearly full', coolant: 'Coolant too hot' };
 const COLOR_NAMES = { background: 'Background', text: 'Text', muted: 'Small text', track: 'Gauge track', good: 'Normal', warn: 'Warning', bad: 'Danger' };
 const spaced = (name) => name.replace(/([a-z])([A-Z])/g, '$1 $2');
 const COLOR_FREE = new Set(['Off', 'Rainbow', 'RainbowMorph']);
 const MIN_FAN = 20;
+const MIN_PUMP = 30;
 const MAX_POINTS = 8;
 const MAX_UPLOAD = 512 * 1024 * 1024;
 const HISTORY_REFRESH_MS = 60000;
@@ -36,6 +39,9 @@ let history = [];
 let historyAt = 0;
 let health = null;
 let chartHover = false;
+let shownTabs = '';
+
+const aioDevices = () => (data ? data.devices.filter((device) => device.isAio && !device.unbound && !device.hidden) : []);
 
 const view = document.getElementById('view');
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -159,6 +165,7 @@ function historyChart(key, title, unit) {
 function renderHistory() {
   const charts = [
     data.stats.hasTemps || history.some((point) => point.temp) ? historyChart('temp', 'Hottest drive', '°C') : '',
+    historyChart('coolant', 'Coolant', '°C'),
     historyChart('used', 'Storage used', '%'),
     historyChart('rpm', 'Average fan speed', ' RPM'),
   ].join('');
@@ -213,8 +220,19 @@ function drivesCard(stats) {
   return `<div class="card"><div class="card-head"><h2>Drives</h2></div>${body}</div>`;
 }
 
+function aioPills(device) {
+  const { coolant, pumpRpm } = device.aio;
+  return `${coolant !== null ? `<span class="pill live">${oneDecimal(coolant)}°C</span>` : ''}${pumpRpm !== null ? `<span class="pill ${pumpRpm > 0 ? 'live' : ''}">Pump ${pumpRpm} RPM</span>` : ''}`;
+}
+
+function aioStatusCard() {
+  const aios = aioDevices();
+  if (!aios.length) return '';
+  return `<div class="card"><div class="card-head"><h2>AIO</h2></div>${aios.map((device) => `<div class="row"><span>${esc(device.name)}</span><span class="row-actions">${aioPills(device)}</span></div>`).join('')}</div>`;
+}
+
 function fansCard(devices) {
-  const fans = devices.filter((device) => device.hasFan);
+  const fans = devices.filter((device) => device.hasFan && !device.isAio);
   const silent = fans.length > 0 && fans.every((device) => !device.unbound && !device.rpms.some((value) => value > 0));
   return `<div class="card"><div class="card-head"><h2>Fans</h2></div>${fans.length ? fans.map((device) => {
     const rpm = device.rpms.filter((value) => value > 0);
@@ -237,7 +255,7 @@ function renderOverview() {
   if (status.error) html += `<div class="card notice">Automation problem: ${esc(status.error)}</div>`;
   if (!stats.available) {
     html += `<div class="card notice">Unraid data isn't available. Add the <b>Unraid state</b> path to the container (host <code>/var/local/emhttp</code>).<br><span class="muted">${esc(stats.error)}</span></div>`;
-    html += fansCard(devices);
+    html += aioStatusCard() + fansCard(devices);
   } else {
     const storageName = stats.volumes.find((volume) => volume.key === stats.selectedVolume)?.name || 'Storage';
     html += `<div class="tiles">
@@ -249,7 +267,7 @@ function renderOverview() {
       ${tile('parity', 'Parity check', values.sync_pct > 0 ? `${values.sync_pct}%` : 'Idle')}` : ''}
     </div>`;
     html += renderHistory();
-    html += `<div class="split"><div>${stats.volumes.length ? storageCard(stats) : ''}${fansCard(devices)}</div><div>${stats.disks.length ? drivesCard(stats) : ''}</div></div>`;
+    html += `<div class="split"><div>${stats.volumes.length ? storageCard(stats) : ''}${aioStatusCard()}${fansCard(devices)}</div><div>${stats.disks.length ? drivesCard(stats) : ''}</div></div>`;
   }
   html += `<p class="footnote">Server time ${esc(data.localTime)} (${esc(data.timezone)}). Daemon ${esc(daemon.version || 'offline')}.</p>`;
   view.innerHTML = html;
@@ -302,7 +320,7 @@ function curveEditor() {
 }
 
 function renderFans() {
-  const fans = data.devices.filter((device) => device.hasFan && !device.unbound);
+  const fans = data.devices.filter((device) => device.hasFan && !device.unbound && !device.isAio);
   let html = fans.length ? `<div class="cards">${fans.map((device) => {
     const isCurve = typeof device.speed === 'string';
     const known = !isCurve || data.curves.includes(device.speed);
@@ -327,6 +345,71 @@ function renderFans() {
   </div>`;
   if (curveDraft) html += curveEditor();
   view.innerHTML = html;
+}
+
+// AIO ---------------------------------------------------------------------
+
+function speedControl(kind, label, speed, min, fallback, mbSync) {
+  const isFixed = typeof speed === 'number';
+  const known = isFixed || speed === 'off' || speed === '__mb_sync__' || data.curves.includes(speed);
+  const percent = isFixed ? Math.max(min, Math.round(speed / 2.55)) : fallback;
+  return `<label>${esc(label)}<select data-aio-mode="${kind}">
+      ${option('auto', 'Automatic (the AIO decides)', speed === 'off')}
+      ${option('constant', 'Fixed speed', isFixed)}
+      ${data.curves.map((curve) => option(`curve:${curve}`, `Curve: ${curve}`, speed === curve)).join('')}
+      ${mbSync || speed === '__mb_sync__' ? option('mb', 'Follow the motherboard', speed === '__mb_sync__') : ''}
+      ${known ? '' : '<option selected disabled>Mixed or set in the full app</option>'}
+    </select></label>
+    ${isFixed ? `<label><span class="slider-label"><span>${esc(label)} speed</span><span data-out>${percent}%</span></span><input type="range" min="${min}" max="100" step="5" value="${percent}" data-aio-speed="${kind}"></label>` : ''}`;
+}
+
+function aioCard(device) {
+  const { aio } = device;
+  const sensorSelect = (key, label) => {
+    const value = aio.sensors[key];
+    const known = !value || data.aioSensors.some((sensor) => sensor.id === value);
+    return `<label>${label}<select data-aio-sensor="${key}">
+      ${option('', 'None', !value)}
+      ${data.aioSensors.map((sensor) => option(sensor.id, sensor.name, sensor.id === value)).join('')}
+      ${known ? '' : '<option selected disabled>Set in the full app</option>'}
+    </select></label>`;
+  };
+  const fanRpm = device.rpms.filter((rpm) => rpm > 0);
+  const fans = device.hasFan && device.fanCount > 0;
+  // Slots can only be shown as one control when they agree.
+  const fanSpeed = aio.fans.every((speed) => speed === aio.fans[0]) ? aio.fans[0] ?? 'off' : '__mixed__';
+  return `<div class="card" data-device="${esc(device.id)}">
+    <div class="card-head"><h2>${esc(device.name)}</h2><span class="row-actions">${aioPills(device)}</span></div>
+    ${speedControl('pump', 'Pump', aio.pump, MIN_PUMP, 70, aio.pumpMbSync)}
+    ${fans ? speedControl('fans', 'Radiator fans', fanSpeed, MIN_FAN, 60, aio.fanMbSync) : ''}
+    ${fanRpm.length ? `<p class="muted num">Fans: ${fanRpm.join(' / ')} RPM</p>` : ''}
+    <div class="actions"><button class="btn" data-coolant-curve>New curve for coolant</button></div>
+    <h3>Pump screen</h3>
+    <label><span class="slider-label"><span>Brightness</span><span data-out>${aio.brightness}%</span></span><input type="range" min="0" max="100" step="5" value="${aio.brightness}" data-aio-brightness></label>
+    <div class="two">
+      <label style="margin-top:6px">Theme<select data-aio-theme>${Array.from({ length: 13 }, (_, index) => option(index, `Theme ${index + 1}`, index === aio.theme)).join('')}</select></label>
+      <label style="margin-top:6px">Rotation<select data-aio-rotation>${[0, 1, 2, 3].map((step) => option(step, `${step * 90}°`, step === aio.rotation)).join('')}</select></label>
+    </div>
+    <label>Seconds per page<input type="number" min="1" max="30" value="${aio.loopInterval}" data-aio-loop></label>
+    <div class="colors">${[['label', 'Labels'], ['value', 'Values'], ['unit', 'Units']].map(([key, text]) => `<label>${text}<input type="color" data-aio-color="${key}" value="${hex(aio.colors[key])}"></label>`).join('')}</div>
+    <h3>What the pump screen shows</h3>
+    <div class="two">${sensorSelect('cpuTemp', 'CPU temperature')}${sensorSelect('cpuLoad', 'CPU load')}</div>
+    <div class="two">${sensorSelect('gpuTemp', 'GPU temperature')}${sensorSelect('gpuLoad', 'GPU load')}</div>
+  </div>`;
+}
+
+function renderAio() {
+  const aios = aioDevices();
+  view.innerHTML = aios.length
+    ? `<div class="cards">${aios.map(aioCard).join('')}</div><p class="footnote">Automatic leaves the AIO to manage itself and doesn't stop the pump. Fixed pump speeds stop at ${MIN_PUMP}% here, and the AIO may run its pump faster than that to stay safe.</p>`
+    : '<div class="card empty">No AIO connected.</div>';
+}
+
+function aioSpeedBody(kind, value, fallback) {
+  if (value === 'auto') return { [kind]: { mode: 'auto' } };
+  if (value === 'mb') return { [kind]: { mode: 'mb' } };
+  if (value === 'constant') return { [kind]: { mode: 'constant', percent: fallback } };
+  return { [kind]: { mode: 'curve', curve: value.slice(6) } };
 }
 
 // Lights ------------------------------------------------------------------
@@ -525,10 +608,12 @@ function renderAuto() {
       ${toggle('id="aDisk"', 'Disabled disks or read errors', alerts.diskProblem)}
       ${data.stats.hasArray ? toggle('id="aParity"', 'Parity errors', alerts.parityErrors) : `<input type="checkbox" id="aParity" hidden ${alerts.parityErrors ? 'checked' : ''}>`}
       ${toggle('id="aStorage"', 'Any pool nearly full', alerts.storageFull)}
+      ${aioDevices().length ? toggle('id="aCoolant"', 'AIO coolant too hot', alerts.coolantHot) : ''}
       <div class="two">
         <label>Drive too hot at (°C)<input type="number" id="aTemp" min="30" max="70" value="${alerts.diskTempC}"></label>
         <label>Nearly full at (%)<input type="number" id="aStoragePct" min="50" max="100" value="${alerts.storagePct}"></label>
       </div>
+      ${aioDevices().length ? `<label>Coolant too hot at (°C)<input type="number" id="aCoolantC" min="30" max="70" value="${alerts.coolantC}"></label>` : ''}
       <div class="actions"><button class="btn primary" id="aSave">Save alerts</button></div>
     </div>
     <div class="page-title"><h2>Schedules</h2></div>
@@ -588,10 +673,12 @@ function renderSystem() {
   view.innerHTML = html;
 }
 
-const RENDER = { overview: renderOverview, fans: renderFans, lights: renderLights, screens: renderScreens, auto: renderAuto, system: renderSystem };
+const RENDER = { overview: renderOverview, fans: renderFans, aio: renderAio, lights: renderLights, screens: renderScreens, auto: renderAuto, system: renderSystem };
 
 function renderTabs() {
-  document.getElementById('tabs').innerHTML = TABS.map(([id, name]) => `<button role="tab" data-tab="${id}" aria-selected="${tab === id}">${icon(id)}<span>${name}</span></button>`).join('');
+  const hasAio = aioDevices().length > 0 || tab === 'aio';
+  shownTabs = String(hasAio);
+  document.getElementById('tabs').innerHTML = TABS.filter(([id]) => id !== 'aio' || hasAio).map(([id, name]) => `<button role="tab" data-tab="${id}" aria-selected="${tab === id}">${icon(id)}<span>${name}</span></button>`).join('');
 }
 
 function interacting() {
@@ -628,6 +715,7 @@ async function refresh(force = false) {
     if (tab === 'overview') await loadHistory();
     document.getElementById('fullApp').href = `http://${location.hostname}:${data.fullAppPort}/vnc.html?autoconnect=1&resize=remote`;
     renderHealth();
+    if (shownTabs !== String(aioDevices().length > 0 || tab === 'aio')) renderTabs();
     // Screens reloads preview images, so it only redraws when asked to.
     if (force === true || (!interacting() && tab !== 'screens' && tab !== 'auto')) RENDER[tab]();
   } catch (error) {
@@ -706,7 +794,7 @@ document.getElementById('tabs').addEventListener('click', (event) => {
 
 view.addEventListener('input', (event) => {
   const target = event.target;
-  if (target.matches('[data-fan-speed], [data-k="brightness"], [data-lcd-brightness]')) {
+  if (target.matches('[data-fan-speed], [data-k="brightness"], [data-lcd-brightness], [data-aio-speed], [data-aio-brightness]')) {
     target.closest('label').querySelector('[data-out]').textContent = `${target.value}%`;
   }
   if (target.closest('#schedules')) scheduleDirty = true;
@@ -733,6 +821,23 @@ view.addEventListener('change', (event) => {
   } else if (target.matches('[data-rgb-mode], [data-rgb-color], [data-rgb-brightness], [data-rgb-speed], [data-rgb-direction]')) {
     target.blur();
     act('/api/rgb', rgbBody(target.closest('[data-device]')));
+  } else if (target.dataset.aioMode) {
+    const kind = target.dataset.aioMode;
+    target.blur();
+    act('/api/aio', { device_id: deviceOf(target), ...aioSpeedBody(kind, target.value, kind === 'pump' ? 70 : 60) });
+  } else if (target.dataset.aioSpeed) {
+    target.blur();
+    act('/api/aio', { device_id: deviceOf(target), [target.dataset.aioSpeed]: { mode: 'constant', percent: Number(target.value) } });
+  } else if (target.dataset.aioSensor) {
+    target.blur();
+    act('/api/aio', { device_id: deviceOf(target), sensors: { [target.dataset.aioSensor]: target.value || null } });
+  } else if (target.dataset.aioColor) {
+    target.blur();
+    act('/api/aio', { device_id: deviceOf(target), colors: { [target.dataset.aioColor]: rgbOf(target.value) } });
+  } else if (target.matches('[data-aio-brightness], [data-aio-theme], [data-aio-rotation], [data-aio-loop]')) {
+    const field = target.matches('[data-aio-brightness]') ? 'brightness' : target.matches('[data-aio-theme]') ? 'theme' : target.matches('[data-aio-rotation]') ? 'rotation' : 'loopInterval';
+    target.blur();
+    act('/api/aio', { device_id: deviceOf(target), [field]: Number(target.value) });
   } else if (target.matches('[data-storage]')) {
     target.blur();
     act('/api/storage', { volume: target.value });
@@ -796,6 +901,17 @@ view.addEventListener('click', async (event) => {
     const speed = card.querySelector('[data-fan-speed]');
     const body = mode === 'constant' ? { mode, percent: Number(speed?.value ?? 60) } : { mode: 'curve', curve: mode.slice(6) };
     actOnAll(data.devices.filter((device) => device.hasFan && !device.unbound), (device) => post('/api/fan', { ...body, device_id: device.id }));
+  } else if (target.matches('[data-coolant-curve]')) {
+    const wanted = JSON.stringify({ type: 'wireless_coolant', device_id: deviceOf(target) });
+    const coolantSensor = data.sensors.find((sensor) => sensor.id === wanted);
+    if (!coolantSensor) {
+      toast("This AIO isn't reporting coolant temperature yet", true);
+      return;
+    }
+    tab = 'fans';
+    renderTabs();
+    window.scrollTo(0, 0);
+    newCurve(coolantSensor.id);
   } else if (target.id === 'curveNew') {
     newCurve();
   } else if (target.id === 'curveDrives') {
@@ -872,6 +988,8 @@ view.addEventListener('click', async (event) => {
       parityErrors: document.getElementById('aParity').checked,
       storageFull: document.getElementById('aStorage').checked,
       storagePct: Number(document.getElementById('aStoragePct').value),
+      coolantHot: document.getElementById('aCoolant')?.checked,
+      coolantC: document.getElementById('aCoolantC') ? Number(document.getElementById('aCoolantC').value) : undefined,
     });
   } else if (target.id === 'addNight') {
     readDrafts();

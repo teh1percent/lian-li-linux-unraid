@@ -29,6 +29,15 @@ const MAX_CURVE_POINTS = 8;
 const BIND_TIMEOUT_MS = 20000;
 const PIXEL_MINUTES = [15, 30, 60, 120];
 const PIXEL_PREPARE_MS = 30000;
+const AIO_FAMILIES = new Set(['Galahad2Trinity', 'HydroShiftLcd', 'Galahad2Lcd', 'HydroShift2Lcd', 'HydroShift2OledCurveLed', 'WirelessAio']);
+// Below this a fixed pump speed gains nothing, and some pumps stall without their own floor.
+const MIN_PUMP_PERCENT = 30;
+const AIO_AUTO = 'off';
+const AIO_MB_SYNC = '__mb_sync__';
+const AIO_SENSORS = { cpuTemp: 'cpu_temp_source', cpuLoad: 'cpu_load_source', gpuTemp: 'gpu_temp_source', gpuLoad: 'gpu_load_source' };
+const AIO_COLORS = { label: 'str_color', value: 'val_color', unit: 'unit_color' };
+// Sources with the same shape in the daemon's sensor list and its AIO settings.
+const AIO_SENSOR_TYPES = new Set(['hwmon', 'nvidia_gpu', 'amd_gpu_usage', 'wireless_coolant', 'cpu_usage', 'mem_usage']);
 const HIDDEN_RGB_MODES = new Set(['Direct', 'Render', 'Paint', 'Voice']);
 const DIRECTIONS = new Set(['Clockwise', 'CounterClockwise', 'Up', 'Down', 'Spread', 'Gather']);
 const RESERVED_CURVE = /^(off$|__mb_sync__)/;
@@ -46,6 +55,18 @@ function check(condition, message) {
 
 function isInt(value, min, max) {
   return Number.isInteger(value) && value >= min && value <= max;
+}
+
+function isAio(device) {
+  return AIO_FAMILIES.has(device.family) || device.has_pump === true || device.has_pump_control === true;
+}
+
+// The daemon lists an AIO's pump after its fans in the same array.
+function splitRpms(device, telemetry) {
+  const all = telemetry?.fan_rpms?.[device.device_id] || [];
+  if (!isAio(device)) return { fans: all, pump: null };
+  const count = device.fan_count || 0;
+  return { fans: all.slice(0, count), pump: all[count] ?? null };
 }
 
 function listMedia(dir) {
@@ -93,14 +114,14 @@ function createApp({ daemon, engine, store, options, history }) {
   };
 
   // Sensors a fan curve may follow. Commands only ever read our own stat files.
-  async function curveSensors() {
+  async function curveSensors(known) {
     const stat = (key, name) => {
       const cmd = `cat ${options.statsDir}/${key}`;
       return { id: `unraid:${key}`, name, source: { type: 'command', cmd }, command: cmd };
     };
     const unraid = [stat('disk_temp_max', 'Hottest drive'), stat('disk_temp_avg', 'Average drive temperature')];
     for (const volume of engine.getStats().volumes) unraid.push(stat(`volume_${volume.key}_temp_max`, `Hottest drive in ${volume.name}`));
-    const listed = await daemon.request('ListSensors').catch(() => []);
+    const listed = known || await daemon.request('ListSensors').catch(() => []);
     const hardware = listed
       .filter((sensor) => sensor.unit === 'C' && sensor.source?.type !== 'command')
       .map((sensor) => ({
@@ -118,6 +139,31 @@ function createApp({ daemon, engine, store, options, history }) {
       return sensors.find((sensor) => sensor.command && sensor.command === curve.temp_command)?.id || 'custom';
     }
     return source ? JSON.stringify(source) : 'custom';
+  }
+
+  const sensorName = (sensor) => sensor.display_name || `${sensor.sensor_name?.device_name || 'Sensor'}: ${sensor.sensor_name?.sensor_name || ''}`;
+  const aioSensorList = (listed) => listed.filter((sensor) => AIO_SENSOR_TYPES.has(sensor.source?.type));
+
+  function aioView(device, config, pumpRpm, telemetry) {
+    const saved = config.aio?.[device.device_id] || {};
+    const rgb = (color) => (color || [255, 255, 255]).slice(0, 3);
+    return {
+      pumpRpm,
+      coolant: telemetry.coolant_temps?.[device.device_id] ?? null,
+      pump: saved.pump_target_rpm ?? AIO_AUTO,
+      fans: (saved.fan_speeds || []).slice(0, device.fan_count || 0),
+      pumpMbSync: device.pump_mb_sync_support === true,
+      fanMbSync: device.mb_sync_support === true,
+      brightness: saved.brightness ?? 80,
+      rotation: saved.rotation ?? 0,
+      theme: saved.theme_index ?? 0,
+      loopInterval: saved.loop_interval ?? 3,
+      colors: Object.fromEntries(Object.entries(AIO_COLORS).map(([key, field]) => [key, rgb(saved[field])])),
+      sensors: Object.fromEntries(Object.entries(AIO_SENSORS).map(([key, field]) => {
+        const source = field === 'cpu_load_source' && saved[field] === undefined ? { type: 'cpu_usage' } : saved[field];
+        return [key, source ? JSON.stringify(source) : ''];
+      })),
+    };
   }
 
   async function state() {
@@ -140,15 +186,16 @@ function createApp({ daemon, engine, store, options, history }) {
       themes: { keys: COLOR_KEYS, presets: PRESETS, defaultLimits: DEFAULT_LIMITS },
     };
     try {
-      const [info, devices, config, telemetry, capabilities, sensors, profiles] = await Promise.all([
+      const [info, devices, config, telemetry, capabilities, listed, profiles] = await Promise.all([
         daemon.request('GetDaemonInfo'),
         daemon.request('ListDevices'),
         daemon.request('GetConfig'),
         daemon.request('GetTelemetry'),
         daemon.request('GetRgbCapabilities').catch(() => []),
-        curveSensors(),
+        daemon.request('ListSensors').catch(() => []),
         daemon.request('ListDeviceProfiles').catch(() => []),
       ]);
+      const sensors = await curveSensors(listed);
       const fans = config.fans?.speeds || [];
       const rgbDevices = config.rgb?.devices || [];
       return {
@@ -157,6 +204,7 @@ function createApp({ daemon, engine, store, options, history }) {
         curves: (config.fan_curves || []).map((curve) => curve.name),
         curveDetails: (config.fan_curves || []).map((curve) => ({ name: curve.name, points: curve.curve, sensor: curveSensorId(curve, sensors) })),
         sensors: sensors.map(({ id, name }) => ({ id, name })),
+        aioSensors: aioSensorList(listed).map((sensor) => ({ id: JSON.stringify(sensor.source), name: sensorName(sensor) })),
         profiles: profiles.map((profile) => ({ name: profile.name, deviceId: profile.device_id })),
         pixelClean: Object.values(telemetry.pixel_clean_statuses || {}).filter((item) => item.active),
         daemonSettings: {
@@ -169,6 +217,8 @@ function createApp({ daemon, engine, store, options, history }) {
           const caps = capabilities.find((item) => item.device_id === device.device_id);
           const zone = rgbDevices.find((item) => item.device_id === device.device_id)?.zones?.[0];
           const entry = findEntry(config, device.device_id);
+          const rpms = splitRpms(device, telemetry);
+          const aio = isAio(device);
           return {
             id: device.device_id,
             name: store.data.names[device.device_id] || device.name,
@@ -182,7 +232,10 @@ function createApp({ daemon, engine, store, options, history }) {
             foreignOnline: device.foreign_master_online === true,
             firmware: device.firmware_version || null,
             fanCount: device.fan_count,
-            rpms: telemetry.fan_rpms?.[device.device_id] || [],
+            rpms: rpms.fans,
+            isAio: aio,
+            hidden: Boolean(device.wireless_group_mac),
+            aio: aio ? aioView(device, config, rpms.pump, telemetry) : null,
             speed: fans.find((group) => group.device_id === device.device_id)?.speeds?.[0] ?? null,
             effect: zone?.effect || null,
             rgbModes: (caps?.supported_modes || []).filter((mode) => !HIDDEN_RGB_MODES.has(mode)),
@@ -194,13 +247,14 @@ function createApp({ daemon, engine, store, options, history }) {
         }),
       };
     } catch (error) {
-      return { ...base, daemon: { connected: false, error: error.message }, curves: [], curveDetails: [], sensors: [], profiles: [], pixelClean: [], daemonSettings: null, devices: [] };
+      return { ...base, daemon: { connected: false, error: error.message }, curves: [], curveDetails: [], sensors: [], aioSensors: [], profiles: [], pixelClean: [], daemonSettings: null, devices: [] };
     }
   }
 
   async function setFan(body) {
     const device = await findDevice(body.device_id);
     check(device.has_fan && !device.is_unbound_wireless, 'This device has no controllable fans');
+    check(!isAio(device), 'Set this one on the AIO page');
     const config = await daemon.request('GetConfig');
     let speed;
     if (body.mode === 'constant') {
@@ -246,6 +300,12 @@ function createApp({ daemon, engine, store, options, history }) {
         group.speeds = group.speeds.map((speed) => (speed === original ? name : speed));
       }
     }
+    if (name !== original) {
+      for (const aio of Object.values(config.aio || {})) {
+        if (aio.pump_target_rpm === original) aio.pump_target_rpm = name;
+        if (aio.fan_speeds) aio.fan_speeds = aio.fan_speeds.map((speed) => (speed === original ? name : speed));
+      }
+    }
     await daemon.write('SetConfig', { config: { ...config, fan_curves: curves } });
   }
 
@@ -255,7 +315,75 @@ function createApp({ daemon, engine, store, options, history }) {
     check(curves.some((curve) => curve.name === body.name), 'Unknown fan curve');
     const used = (config.fans?.speeds || []).some((group) => group.speeds.includes(body.name));
     check(!used, 'A fan group is using this curve. Switch it to something else first.');
+    const usedByAio = Object.values(config.aio || {}).some((aio) => aio.pump_target_rpm === body.name || aio.fan_speeds?.includes(body.name));
+    check(!usedByAio, 'An AIO is using this curve. Switch it to something else first.');
     await daemon.write('SetConfig', { config: { ...config, fan_curves: curves.filter((curve) => curve.name !== body.name) } });
+  }
+
+  // "Automatic" is the daemon's "off": it leaves the AIO to manage itself and
+  // never stops the pump, so nothing here can send a pump speed of zero.
+  function aioSpeed(spec, config, minPercent, mbSupported) {
+    check(spec && typeof spec === 'object', 'Invalid speed');
+    if (spec.mode === 'auto') return AIO_AUTO;
+    if (spec.mode === 'constant') {
+      check(isInt(spec.percent, minPercent, 100), `Speed must be ${minPercent} to 100%`);
+      return Math.round((spec.percent / 100) * 255);
+    }
+    if (spec.mode === 'curve') {
+      check((config.fan_curves || []).some((curve) => curve.name === spec.curve), 'Unknown fan curve');
+      return spec.curve;
+    }
+    check(spec.mode === 'mb', 'Unknown speed mode');
+    check(mbSupported, 'This AIO does not support motherboard sync');
+    return AIO_MB_SYNC;
+  }
+
+  async function setAio(body) {
+    const device = await findDevice(body.device_id);
+    check(isAio(device) && !device.is_unbound_wireless, 'This device is not a paired AIO');
+    const config = await daemon.request('GetConfig');
+    const next = { pump_target_rpm: AIO_AUTO, fan_speeds: [AIO_AUTO, AIO_AUTO, AIO_AUTO, AIO_AUTO], ...config.aio?.[device.device_id] };
+    if (body.pump !== undefined) {
+      check(device.has_pump || device.has_pump_control, 'This AIO has no controllable pump');
+      next.pump_target_rpm = aioSpeed(body.pump, config, MIN_PUMP_PERCENT, device.pump_mb_sync_support === true);
+    }
+    if (body.fans !== undefined) {
+      check(device.has_fan && device.fan_count > 0, 'This AIO has no controllable fans');
+      const speed = aioSpeed(body.fans, config, MIN_FAN_PERCENT, device.mb_sync_support === true);
+      next.fan_speeds = next.fan_speeds.map((current, slot) => (slot < device.fan_count ? speed : current));
+    }
+    if (body.brightness !== undefined) {
+      check(isInt(body.brightness, 0, 100), 'Brightness must be 0 to 100');
+      next.brightness = body.brightness;
+    }
+    if (body.rotation !== undefined) {
+      check(isInt(body.rotation, 0, 3), 'Invalid rotation');
+      next.rotation = body.rotation;
+    }
+    if (body.theme !== undefined) {
+      check(isInt(body.theme, 0, 12), 'Invalid theme');
+      next.theme_index = body.theme;
+    }
+    if (body.loopInterval !== undefined) {
+      check(isInt(body.loopInterval, 1, 30), 'Page time must be 1 to 30 seconds');
+      next.loop_interval = body.loopInterval;
+    }
+    for (const [key, field] of Object.entries(AIO_COLORS)) {
+      if (body.colors?.[key] === undefined) continue;
+      check(isColor(body.colors[key]), 'Invalid colour');
+      next[field] = [...body.colors[key], 255];
+    }
+    if (body.sensors !== undefined) {
+      const allowed = aioSensorList(await daemon.request('ListSensors').catch(() => []));
+      for (const [key, value] of Object.entries(body.sensors)) {
+        check(Object.hasOwn(AIO_SENSORS, key), 'Unknown sensor slot');
+        // Picked from the daemon's own list, so a command can never come in here.
+        const sensor = allowed.find((item) => JSON.stringify(item.source) === value);
+        check(value === null || sensor, 'Unknown sensor');
+        next[AIO_SENSORS[key]] = sensor ? sensor.source : null;
+      }
+    }
+    await daemon.write('SetConfig', { config: { ...config, aio: { ...config.aio, [device.device_id]: next } } });
   }
 
   async function setRgb(body) {
@@ -468,6 +596,8 @@ function createApp({ daemon, engine, store, options, history }) {
     check(isInt(body.diskTempC, 30, 70), 'Temperature must be 30 to 70 °C');
     const storagePct = body.storagePct ?? store.data.alerts.storagePct;
     check(isInt(storagePct, 50, 100), 'Storage limit must be 50 to 100%');
+    const coolantC = body.coolantC ?? store.data.alerts.coolantC;
+    check(isInt(coolantC, 30, 70), 'Coolant limit must be 30 to 70 °C');
     Object.assign(store.data.alerts, {
       enabled: body.enabled === true,
       diskTempC: body.diskTempC,
@@ -475,6 +605,8 @@ function createApp({ daemon, engine, store, options, history }) {
       parityErrors: body.parityErrors === true,
       storageFull: body.storageFull === true,
       storagePct,
+      coolantHot: body.coolantHot === undefined ? store.data.alerts.coolantHot : body.coolantHot === true,
+      coolantC,
     });
     store.save();
     await engine.tick();
@@ -557,6 +689,7 @@ function createApp({ daemon, engine, store, options, history }) {
     '/api/curve': queued(saveCurve),
     '/api/curve/delete': queued(deleteCurve),
     '/api/rgb': queued(setRgb),
+    '/api/aio': queued(setAio),
     '/api/profile': setProfile,
     '/api/device': setDevice,
     '/api/screen': setScreen,
@@ -681,11 +814,13 @@ function main() {
   };
 
   const store = new Store(options.settingsFile);
-  let stats = readStats(options.emhttpDir);
+  // The hottest AIO's coolant, for the alert and its LCD screen. 0 means no reading.
+  let coolant = 0;
+  let stats = { ...readStats(options.emhttpDir), coolantMax: coolant };
   const collect = () => {
-    stats = readStats(options.emhttpDir);
+    stats = { ...readStats(options.emhttpDir), coolantMax: coolant };
     try {
-      writeStats(options.statsDir, selectStorage(stats, store.data.storageVolume).values);
+      writeStats(options.statsDir, { ...selectStorage(stats, store.data.storageVolume).values, coolant_temp: coolant });
     } catch (error) {
       stats.error = `Cannot write ${options.statsDir}: ${error.message}`;
     }
@@ -698,13 +833,23 @@ function main() {
   engine.tick();
   setInterval(() => engine.tick(), ENGINE_INTERVAL_MS);
 
+  const readCoolant = (telemetry) => Math.max(0, ...Object.values(telemetry?.coolant_temps || {}));
+  setInterval(async () => {
+    coolant = readCoolant(await daemon.request('GetTelemetry').catch(() => null));
+  }, STATS_INTERVAL_MS);
+
   const history = new History(options.historyFile);
   let samples = 0;
   setInterval(async () => {
-    const telemetry = await daemon.request('GetTelemetry').catch(() => null);
-    const rpms = Object.values(telemetry?.fan_rpms || {}).flat().filter((rpm) => rpm > 0);
+    const [telemetry, devices] = await Promise.all([
+      daemon.request('GetTelemetry').catch(() => null),
+      daemon.request('ListDevices').catch(() => []),
+    ]);
+    const rpms = devices.flatMap((device) => splitRpms(device, telemetry).fans).filter((rpm) => rpm > 0);
+    const hottestCoolant = readCoolant(telemetry);
     history.add({
       t: Date.now(),
+      coolant: hottestCoolant > 0 ? hottestCoolant : null,
       temp: stats.hasTemps ? stats.values.disk_temp_max : null,
       used: stats.available ? stats.values.storage_used_pct : null,
       rpm: rpms.length ? Math.round(rpms.reduce((sum, rpm) => sum + rpm, 0) / rpms.length) : 0,

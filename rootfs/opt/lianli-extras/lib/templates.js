@@ -116,6 +116,11 @@ function buildAlerts(statsDir) {
       value('errors', stat('parity_errors'), 210, 110, { max: 100000 }),
       label('unit', 'errors', 300, 36),
     ]),
+    template('unraid_alert_coolant', 'Unraid alert: Coolant hot', ALERT_RED, [
+      label('title', 'COOLANT HOT', 112, 46),
+      value('temp', stat('coolant_temp'), 210, 130, { max: 100 }),
+      label('unit', '°C', 308, 36),
+    ]),
     template('unraid_alert_storage', 'Unraid alert: Storage full', ALERT_RED, [
       label('title', 'STORAGE', 112, 54),
       value('used', stat('volume_max_used_pct'), 210, 110),

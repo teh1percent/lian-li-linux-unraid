@@ -48,6 +48,9 @@ function createMockDaemon({ lcds = 3 } = {}) {
   }));
 
   state.fans = fans;
+  // Tests add AIOs here, with their readings in state.telemetry.
+  state.extra = [];
+  state.telemetry = { fan_rpms: {}, coolant_temps: {} };
 
   function handle(request) {
     const { method, params } = request;
@@ -68,9 +71,9 @@ function createMockDaemon({ lcds = 3 } = {}) {
     const ok = (data = null) => ({ status: 'ok', data });
     switch (method) {
       case 'GetDaemonInfo': return ok(state.info);
-      case 'ListDevices': return ok([...fans, ...screens]);
+      case 'ListDevices': return ok([...fans, ...screens, ...state.extra]);
       case 'GetConfig': return ok(state.config);
-      case 'GetTelemetry': return ok({ fan_rpms: { [fans[0].device_id]: [1200, 1210, 1190] } });
+      case 'GetTelemetry': return ok({ fan_rpms: { [fans[0].device_id]: [1200, 1210, 1190], ...state.telemetry.fan_rpms }, coolant_temps: state.telemetry.coolant_temps });
       case 'GetRgbCapabilities': return ok(fans.map((fan) => ({
         device_id: fan.device_id,
         supported_modes: ['Off', 'Direct', 'Static', 'Rainbow', 'Breathing', 'Meteor'],
