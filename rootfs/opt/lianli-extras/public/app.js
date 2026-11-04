@@ -41,6 +41,9 @@ let health = null;
 let chartHover = false;
 let shownTabs = '';
 
+// Extra reasons to hold off redrawing a page, added by the page scripts.
+const holds = [];
+
 const aioDevices = () => (data ? data.devices.filter((device) => device.isAio && !device.unbound && !device.hidden) : []);
 
 const view = document.getElementById('view');
@@ -301,7 +304,7 @@ function curveEditor() {
       <label style="margin-top:0">Name<input type="text" maxlength="40" data-curve="name" value="${esc(draft.name)}"></label>
       <label style="margin-top:0">Follow this temperature
         <select data-curve="sensor">
-          ${draft.sensor === 'custom' ? '<option value="custom" selected disabled>Set in the full app (pick one to save)</option>' : ''}
+          ${draft.sensor === 'custom' ? '<option value="custom" selected disabled>Set outside this page (pick one to save)</option>' : ''}
           ${sensors}
         </select></label>
     </div>
@@ -320,30 +323,34 @@ function curveEditor() {
 }
 
 function renderFans() {
-  const fans = data.devices.filter((device) => device.hasFan && !device.unbound && !device.isAio);
+  const fans = data.devices.filter((device) => device.hasFan && !device.unbound && !device.isAio && !device.hidden);
   let html = fans.length ? `<div class="cards">${fans.map((device) => {
+    const mode = fanMode(device);
     const isCurve = typeof device.speed === 'string';
-    const known = !isCurve || data.curves.includes(device.speed);
+    const known = !isCurve || data.curves.includes(device.speed) || mode !== 'single';
     const percent = typeof device.speed === 'number' ? Math.max(MIN_FAN, Math.round(device.speed / 2.55)) : 60;
-    const options = [option('constant', 'Fixed speed', !isCurve)]
-      .concat(data.curves.map((curve) => option(`curve:${curve}`, `Curve: ${curve}`, device.speed === curve)));
-    if (!known) options.push('<option selected disabled>Set in the full app</option>');
+    const options = [option('constant', 'Fixed speed', mode === 'single' && !isCurve)]
+      .concat(data.curves.map((curve) => option(`curve:${curve}`, `Curve: ${curve}`, mode === 'single' && device.speed === curve)))
+      .concat(fanModeOptions(device, mode));
+    if (!known) options.push('<option selected disabled>Custom setting</option>');
     const rpm = device.rpms.filter((value) => value > 0);
     return `<div class="card" data-device="${esc(device.id)}">
       <div class="card-head"><h2>${esc(device.name)}</h2><span class="pill ${rpm.length ? 'live' : ''}">${rpm.length ? `${rpm.join(' / ')} RPM` : '0 RPM'}</span></div>
       <label style="margin-top:0">Mode<select data-fan-mode>${options.join('')}</select></label>
-      ${isCurve ? '' : `<label><span class="slider-label"><span>Speed</span><span data-out>${percent}%</span></span><input type="range" min="${MIN_FAN}" max="100" step="5" value="${percent}" data-fan-speed></label>`}
-      ${fans.length > 1 ? '<div class="actions"><button class="btn" data-fan-all>Use on all fans</button></div>' : ''}
+      ${isCurve || mode !== 'single' ? '' : `<label><span class="slider-label"><span>Speed</span><span data-out>${percent}%</span></span><input type="range" min="${MIN_FAN}" max="100" step="5" value="${percent}" data-fan-speed></label>`}
+      ${fanModeDetail(device, mode)}
+      ${fans.length > 1 && mode !== 'slots' ? '<div class="actions"><button class="btn" data-fan-all>Use on all fans</button></div>' : ''}
     </div>`;
   }).join('')}</div><p class="footnote" style="margin-bottom:14px">Speeds stop at ${MIN_FAN}% here so fans can't be stopped by accident.</p>`
     : '<div class="card empty">No paired fan groups found.</div>';
   html += `<div class="card"><div class="card-head"><h2>Fan curves</h2></div>${data.curveDetails.length ? data.curveDetails.map((curve) => `<div class="row">
-      <span>${esc(curve.name)}<br><span class="muted">${esc(data.sensors.find((sensor) => sensor.id === curve.sensor)?.name || 'Set in the full app')}, ${curve.points.map(([temp, pct]) => `${temp}°→${pct}%`).join(' ')}</span></span>
+      <span>${esc(curve.name)}<br><span class="muted">${esc(data.sensors.find((sensor) => sensor.id === curve.sensor)?.name || 'Custom sensor')}, ${curve.points.map(([temp, pct]) => `${temp}°→${pct}%`).join(' ')}</span></span>
       <span class="row-actions"><button class="btn" data-curve-edit="${esc(curve.name)}">Edit</button><button class="btn danger" data-curve-delete="${esc(curve.name)}">Delete</button></span>
     </div>`).join('') : '<span class="empty">No curves yet.</span>'}
     ${curveDraft ? '' : '<div class="actions"><button class="btn primary" id="curveNew">New curve</button><button class="btn" id="curveDrives">New curve for drive temperature</button></div>'}
   </div>`;
   if (curveDraft) html += curveEditor();
+  html += fanTuningCard();
   view.innerHTML = html;
 }
 
@@ -358,7 +365,7 @@ function speedControl(kind, label, speed, min, fallback, mbSync) {
       ${option('constant', 'Fixed speed', isFixed)}
       ${data.curves.map((curve) => option(`curve:${curve}`, `Curve: ${curve}`, speed === curve)).join('')}
       ${mbSync || speed === '__mb_sync__' ? option('mb', 'Follow the motherboard', speed === '__mb_sync__') : ''}
-      ${known ? '' : '<option selected disabled>Mixed or set in the full app</option>'}
+      ${known ? '' : '<option selected disabled>Mixed or custom</option>'}
     </select></label>
     ${isFixed ? `<label><span class="slider-label"><span>${esc(label)} speed</span><span data-out>${percent}%</span></span><input type="range" min="${min}" max="100" step="5" value="${percent}" data-aio-speed="${kind}"></label>` : ''}`;
 }
@@ -371,7 +378,7 @@ function aioCard(device) {
     return `<label>${label}<select data-aio-sensor="${key}">
       ${option('', 'None', !value)}
       ${data.aioSensors.map((sensor) => option(sensor.id, sensor.name, sensor.id === value)).join('')}
-      ${known ? '' : '<option selected disabled>Set in the full app</option>'}
+      ${known ? '' : '<option selected disabled>Custom sensor</option>'}
     </select></label>`;
   };
   const fanRpm = device.rpms.filter((rpm) => rpm > 0);
@@ -420,7 +427,7 @@ function effectParams(device, mode) {
 
 function renderLights() {
   const lights = data.devices.filter((device) => device.hasRgb && !device.unbound);
-  let html = '';
+  let html = syncNotice();
   if (data.status.lightsOff) html += '<div class="card notice">A schedule has the lights off right now. They come back when it ends.</div>';
   if (lights.length > 1 && !data.status.lightsOff) html += '<div class="toolbar"><button class="btn" id="lightsOff">Turn all lights off</button></div>';
   html += lights.length ? `<div class="cards">${lights.map((device) => {
@@ -431,6 +438,7 @@ function renderLights() {
     const colors = Array.from({ length: colorCount }, (_, index) => effect.colors?.[index] || effect.colors?.[0] || [255, 255, 255]);
     const directions = params?.directions || [];
     const canSpeed = params ? params.supports_speed : !COLOR_FREE.has(effect.mode) && effect.mode !== 'Static';
+    if (device.lighting?.motherboard) return motherboardCard(device);
     return `<div class="card" data-device="${esc(device.id)}">
       <div class="card-head"><h2>${esc(device.name)}</h2>${colors.length ? `<span class="dots" aria-hidden="true">${colors.map((color) => `<i style="background:${hex(color)}"></i>`).join('')}</span>` : ''}</div>
       <label style="margin-top:0">Effect<select data-rgb-mode>${modes.map((mode) => option(mode, spaced(mode), mode === effect.mode)).join('')}</select></label>
@@ -441,6 +449,7 @@ function renderLights() {
       </div>
       ${directions.length > 1 ? `<label>Direction<select data-rgb-direction>${directions.map((item) => option(item, spaced(item), item === effect.direction)).join('')}</select></label>` : ''}
       <div class="actions"><button class="btn" data-rgb-all>Use on all fans</button></div>
+      ${lightingMore(device)}
     </div>`;
   }).join('')}</div>` : '<div class="card empty">No paired lighting found.</div>';
   if (lights.length) {
@@ -451,6 +460,7 @@ function renderLights() {
       <label>Name<input type="text" maxlength="40" id="profileName"></label></div>
       <div class="actions"><button class="btn primary" id="profileSave">Save setup</button></div>
     </div>`;
+    html += quickSyncCard() + openRgbCard();
   }
   view.innerHTML = html;
 }
@@ -461,6 +471,7 @@ function screenValue(device) {
   const screen = data.settings.screens[device.id];
   if (!screen) return 'keep';
   if (screen.kind === 'color') return 'color';
+  if (screen.kind === 'sensor') return 'sensor';
   return screen.kind === 'template' ? `template:${screen.templateId}` : `media:${screen.path}`;
 }
 
@@ -516,7 +527,8 @@ function lcdThumb(device) {
   }
   if (screen?.kind === 'color') return `<div class="thumb" style="background:${hex(screen.rgb)}"></div>`;
   if (screen?.kind === 'media') return '<div class="thumb">Your file</div>';
-  return '<div class="thumb">Full app</div>';
+  if (screen?.kind === 'sensor') return '<div class="thumb">Gauge</div>';
+  return '<div class="thumb">Not managed</div>';
 }
 
 function lcdCard(device) {
@@ -528,13 +540,16 @@ function lcdCard(device) {
     <div class="lcd-top">${lcdThumb(device)}
       <label>Shows
         <select data-screen="${esc(device.id)}">
-          <option value="keep">Set in the full app</option>
+          <option value="keep">Leave as it is</option>
           <optgroup label="Unraid">${data.templates.map((item) => option(`template:${item.id}`, item.name)).join('')}</optgroup>
+          ${data.designs.length ? `<optgroup label="Your designs">${data.designs.map((item) => option(`template:${item.id}`, item.name)).join('')}</optgroup>` : ''}
           ${data.media.length ? `<optgroup label="Your media">${data.media.map((file) => option(`media:${file}`, fileName(file))).join('')}</optgroup>` : ''}
+          <option value="sensor">Sensor gauge</option>
           <option value="color">Solid colour</option>
         </select></label>
     </div>
     ${screen?.kind === 'color' ? `<label>Colour<input type="color" data-solid value="${hex(screen.rgb)}"></label>` : ''}
+    ${lcdMore(device, screen)}
     <label><span class="slider-label"><span>Brightness</span><span data-out>${device.brightness}%</span></span><input type="range" min="0" max="100" step="5" value="${device.brightness}" data-lcd-brightness></label>
     <div class="two">
       <label style="margin-top:6px">Rotation<select data-lcd-rotation>${[0, 90, 180, 270].map((angle) => option(angle, `${angle}°`, angle === device.orientation)).join('')}</select></label>
@@ -556,7 +571,7 @@ function renderScreens() {
     if (lcds.length > 1) html += '<div class="toolbar"><button class="btn" id="spread">Different stat on each fan</button></div>';
     html += `<div class="cards">${lcds.map(lcdCard).join('')}</div>`;
   }
-  html += themeCard();
+  html += desktopModeCard() + designsCard() + themeCard();
   const uploaded = data.media.filter((file) => file.startsWith(`${data.uploadDir}/`));
   html += `<div class="card"><div class="card-head"><h2>Your images and videos</h2></div>
     ${uploaded.map((file) => `<div class="row"><span>${esc(fileName(file))}</span><button class="btn danger" data-media-delete="${esc(file)}">Delete</button></div>`).join('')}
@@ -574,6 +589,7 @@ function renderScreens() {
   }
   html += `<div class="card"><div class="card-head"><h2>Unraid screens</h2></div><div class="gallery">${data.templates.map((item) => `<figure><img loading="lazy" alt="${esc(item.name)} preview" src="/api/preview?id=${encodeURIComponent(item.id)}"><figcaption>${esc(item.name.replace('Unraid: ', ''))}</figcaption></figure>`).join('')}</div>
     <p class="muted">Previews come from the daemon, so live values can show as blank here.</p></div>`;
+  html += catalogCard() + storageCleanupCard();
   view.innerHTML = html;
   lcds.forEach((device) => { view.querySelector(`[data-screen="${CSS.escape(device.id)}"]`).value = screenValue(device); });
 }
@@ -582,7 +598,7 @@ function renderScreens() {
 
 function scheduleCard(item, index) {
   const screens = [option('', "Don't change screen", !item.templateId)]
-    .concat(data.templates.map((template) => option(template.id, template.name, item.templateId === template.id)));
+    .concat([...data.templates, ...data.designs].map((template) => option(template.id, template.name, item.templateId === template.id)));
   return `<div class="card" data-index="${index}">
     <div class="card-head"><h2>${esc(item.name)}</h2><button class="btn" data-remove>Remove</button></div>
     ${toggle('data-k="enabled"', 'On', item.enabled)}
@@ -630,15 +646,18 @@ function deviceCard(device) {
   const parts = [device.model];
   if (device.serial) parts.push(device.serial);
   if (device.firmware) parts.push(`firmware ${device.firmware}`);
-  const pairing = !wireless ? ''
-    : device.unbound
-      ? `<button class="btn primary" data-pair="bind" ${device.foreignOnline ? 'disabled' : ''}>Pair</button>`
-      : '<button class="btn danger" data-pair="unbind">Unpair</button>';
+  const takeover = device.bindStatus === 'bind_other';
+  const pairing = !wireless && !device.unbound ? ''
+    : device.unbound || takeover
+      ? `<button class="btn primary" data-pair="bind" ${takeover ? 'data-takeover' : ''} ${device.foreignOnline ? 'disabled' : ''}>${takeover ? 'Take over' : 'Pair'}</button>`
+      : `${device.needsRebind ? '<button class="btn primary" data-pair="bind">Pair again</button>' : ''}<button class="btn danger" data-pair="unbind">Unpair</button>`;
   return `<div class="card" data-device="${esc(device.id)}">
     <label style="margin-top:0">Name<input type="text" maxlength="40" data-rename value="${esc(data.settings.names[device.id] || '')}" placeholder="${esc(device.model)}"></label>
     <p class="muted" style="margin-top:8px;overflow-wrap:anywhere">${esc(parts.join(', '))}</p>
     ${device.foreignOnline ? '<p class="warn">Paired to another controller that is switched on. Turn that controller off to pair it here.</p>' : ''}
-    ${wireless ? `<div class="actions"><button class="btn" data-identify>Identify</button>${pairing}</div>` : ''}
+    ${deviceReadings(device)}
+    ${device.maxFanQuantity ? `<label>Fans on this port<select data-fan-quantity>${Array.from({ length: device.maxFanQuantity }, (_, index) => option(index + 1, index + 1, index + 1 === device.fanCount)).join('')}</select></label>` : ''}
+    <div class="actions">${device.hasRgb || wireless ? '<button class="btn" data-identify>Identify</button>' : ''}${pairing}${wireless && device.hasLcd ? '<button class="btn" data-reboot>Restart screen</button>' : ''}</div>
   </div>`;
 }
 
@@ -657,28 +676,31 @@ function renderSystem() {
   const unbound = data.devices.filter((device) => device.unbound && !device.foreignOnline);
   let html = '<div class="page-title"><h2>Devices</h2></div>';
   if (unbound.length > 1) html += '<div class="toolbar"><button class="btn" id="pairAll">Pair all unpaired fans</button></div>';
-  html += data.devices.length ? `<div class="cards">${data.devices.map(deviceCard).join('')}</div>` : '<div class="card empty">No devices found.</div>';
+  html += data.devices.length ? `<div class="cards">${data.devices.filter((device) => !device.hidden).map(deviceCard).join('')}</div>` : '<div class="card empty">No devices found.</div>';
   html += '<div class="split"><div>';
   if (settings) {
     html += `<div class="card"><div class="card-head"><h2>Settings</h2></div>
       ${toggle('data-setting="turnOffLcds"', 'Turn screens off when the container stops', settings.turnOffLcds)}
       ${toggle('data-setting="hardwareVideo"', 'Use hardware video decoding', settings.hardwareVideo)}
       ${toggle('data-setting="rgbDrift"', 'Keep fan lights in sync with their saved colours', settings.rgbDrift)}
-      <label>Video frame rate (1 to 60)<input type="number" min="1" max="60" data-setting-fps value="${settings.defaultFps ?? ''}" placeholder="Default"></label>
+      <label>Video frame rate (1 to 120)<input type="number" min="1" max="120" data-setting-fps value="${settings.defaultFps ?? ''}" placeholder="Default"></label>
+      ${settingsMore(settings)}
     </div>`;
+    html += thermalCard(settings);
   }
   html += `<div class="card"><div class="card-head"><h2>Backup</h2></div><p class="muted" style="margin:0 0 12px">Downloads the fan, lighting and screen settings plus this dashboard's settings as a JSON file.</p>
     <a class="btn" href="/api/export" download>Download settings</a></div>`;
-  html += `</div><div>${healthCard()}</div></div>`;
+  html += backupsCard();
+  html += `</div><div>${healthCard()}${diagnosticsCard()}${updateCard()}</div></div>`;
   view.innerHTML = html;
 }
 
-const RENDER = { overview: renderOverview, fans: renderFans, aio: renderAio, lights: renderLights, screens: renderScreens, auto: renderAuto, system: renderSystem };
+const RENDER = { overview: renderOverview, fans: renderFans, aio: renderAio, lights: renderLights, screens: renderScreens, auto: renderAuto, system: renderSystem, designer: () => renderDesigner() };
 
 function renderTabs() {
   const hasAio = aioDevices().length > 0 || tab === 'aio';
   shownTabs = String(hasAio);
-  document.getElementById('tabs').innerHTML = TABS.filter(([id]) => id !== 'aio' || hasAio).map(([id, name]) => `<button role="tab" data-tab="${id}" aria-selected="${tab === id}">${icon(id)}<span>${name}</span></button>`).join('');
+  document.getElementById('tabs').innerHTML = TABS.filter(([id]) => id !== 'aio' || hasAio).map(([id, name]) => `<button role="tab" data-tab="${id}" aria-selected="${tab === id || (tab === 'designer' && id === 'screens')}">${icon(id)}<span>${name}</span></button>`).join('');
 }
 
 function interacting() {
@@ -686,7 +708,8 @@ function interacting() {
   return (active && view.contains(active) && /^(INPUT|SELECT)$/.test(active.tagName))
     || chartHover
     || (tab === 'auto' && scheduleDirty)
-    || (tab === 'fans' && curveDraft);
+    || (tab === 'fans' && curveDraft)
+    || holds.some((hold) => hold());
 }
 
 async function loadHistory() {
@@ -713,7 +736,6 @@ async function refresh(force = false) {
     if (!response.ok) throw new Error(`Status ${response.status}`);
     data = await response.json();
     if (tab === 'overview') await loadHistory();
-    document.getElementById('fullApp').href = `http://${location.hostname}:${data.fullAppPort}/vnc.html?autoconnect=1&resize=remote`;
     renderHealth();
     if (shownTabs !== String(aioDevices().length > 0 || tab === 'aio')) renderTabs();
     // Screens reloads preview images, so it only redraws when asked to.
@@ -803,6 +825,7 @@ view.addEventListener('input', (event) => {
     curveDraft.points[Number(target.dataset.point)][Number(target.dataset.part)] = target.value === '' ? NaN : Number(target.value);
     document.getElementById('curvePreview').innerHTML = curveChart(curveDraft.points);
   }
+  if (target.dataset.show !== undefined) target.closest('label').querySelector('[data-out]').textContent = `${target.value}${target.dataset.show}`;
   if (target.dataset.limit) themeDraft.limits[target.dataset.limit] = Number(target.value);
   if (target.dataset.themeColor) themeDraft.customColors[target.dataset.themeColor] = rgbOf(target.value);
 });
@@ -810,7 +833,9 @@ view.addEventListener('input', (event) => {
 view.addEventListener('change', (event) => {
   const target = event.target;
   if (target.matches('[data-fan-mode]')) {
+    if (fanModeChange(target)) return;
     const body = { device_id: deviceOf(target) };
+    leaveSlots(body.device_id);
     if (target.value === 'constant') Object.assign(body, { mode: 'constant', percent: 60 });
     else Object.assign(body, { mode: 'curve', curve: target.value.slice(6) });
     target.blur();
@@ -848,6 +873,7 @@ view.addEventListener('change', (event) => {
     if (kind === 'template') screen = { kind, templateId: value };
     else if (kind === 'media') screen = { kind, path: value };
     else if (kind === 'color') screen = { kind, rgb: [0, 0, 0] };
+    else if (kind === 'sensor') screen = { kind, sensor: newGauge() };
     target.blur();
     act('/api/screen', { device_id: target.dataset.screen, screen });
   } else if (target.matches('[data-solid]')) {
@@ -899,8 +925,9 @@ view.addEventListener('click', async (event) => {
     const card = target.closest('[data-device]');
     const mode = card.querySelector('[data-fan-mode]').value;
     const speed = card.querySelector('[data-fan-speed]');
-    const body = mode === 'constant' ? { mode, percent: Number(speed?.value ?? 60) } : { mode: 'curve', curve: mode.slice(6) };
-    actOnAll(data.devices.filter((device) => device.hasFan && !device.unbound), (device) => post('/api/fan', { ...body, device_id: device.id }));
+    const header = card.querySelector('[data-fan-header]')?.value;
+    const body = mode === 'mb' ? { mode, header } : mode === 'constant' ? { mode, percent: Number(speed?.value ?? 60) } : { mode: 'curve', curve: mode.slice(6) };
+    actOnAll(data.devices.filter((device) => device.hasFan && !device.unbound && !device.isAio && !device.hidden), (device) => post('/api/fan', { ...body, device_id: device.id }));
   } else if (target.matches('[data-coolant-curve]')) {
     const wanted = JSON.stringify({ type: 'wireless_coolant', device_id: deviceOf(target) });
     const coolantSensor = data.sensors.find((sensor) => sensor.id === wanted);
@@ -1013,6 +1040,7 @@ view.addEventListener('click', async (event) => {
     refresh(true);
   } else if (set.pair) {
     if (set.pair === 'unbind' && !window.confirm('Unpair this fan group? It stops responding here until you pair it again.')) return;
+    if (set.takeover !== undefined && !window.confirm('This device is paired to another controller. Take it over?')) return;
     target.disabled = true;
     toast(set.pair === 'bind' ? 'Pairing…' : 'Unpairing…');
     act('/api/device', { device_id: deviceOf(target), action: set.pair }, 'Done');
@@ -1059,7 +1087,3 @@ view.addEventListener('pointerout', (event) => {
   chart.querySelector('[data-readout]').textContent = chart.dataset.latest;
 });
 
-document.getElementById('logo').innerHTML = icon('fans');
-renderTabs();
-refresh(true);
-setInterval(refresh, 4000);

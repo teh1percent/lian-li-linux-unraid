@@ -5,10 +5,12 @@ for Unraid. One container runs:
 
 - `lianli-daemon --system` as the `lianli` user, the same way upstream's
   `lianli-daemon-system.service` does. It keeps fan curves, RGB and LCDs running.
-- The upstream Tauri GUI on a virtual X display, which you open in the browser
-  through noVNC on port **6080**.
-- A phone-friendly dashboard on port **6090**, with Unraid stats on the LCD fans,
-  schedules and alerts. See [Dashboard and Unraid features](#dashboard-and-unraid-features).
+- A phone-friendly dashboard on port **6090** with every control, plus Unraid stats
+  on the LCD fans, a screen designer, schedules and alerts. See
+  [Dashboard and Unraid features](#dashboard-and-unraid-features).
+
+The upstream desktop GUI is removed from the image, so there's no X display, VNC or
+second port.
 
 The image installs the upstream **Debian 13 release `.deb`** (checked against the
 release's `SHA256SUMS`), so there is no Rust/Node build.
@@ -16,11 +18,10 @@ release's `SHA256SUMS`), so there is no Rust/Node build.
 ## Layout
 
 ```
-Dockerfile                       debian:trixie-slim + noVNC stack + upstream .deb
+Dockerfile                       debian:trixie-slim + upstream .deb
 rootfs/usr/local/bin/
   entrypoint.sh                  container setup that systemd/tmpfiles/udev would normally do
   sync-devices.sh                mirrors /dev/bus/usb and /dev/hidraw* from sysfs (udev stand-in)
-  run-gui.sh                     launches lianli-gui and restarts it if the window is closed
 rootfs/opt/lianli-extras/        dashboard, Unraid stats and LCD automation (Node, no dependencies)
 rootfs/etc/supervisor/supervisord.conf
 tests/                           tests against a mock daemon: node --test tests/extras.test.js
@@ -62,22 +63,19 @@ or run the workflow manually with the version as input.
    ```
 
 2. **Docker → Add Container →** choose `lian-li-linux` from the Template dropdown → **Apply**.
-3. Click the container icon → **WebUI**. The GUI opens in the browser.
+3. Click the container icon → **WebUI**. The dashboard opens in the browser.
 
 The template defaults to:
 
 | Setting | Container | Default |
 |---|---|---|
 | Dashboard (WebUI) | `6090/tcp` | `6090` |
-| Full app | `6080/tcp` | `6080` |
 | AppData | `/var/lib/lianli` | `/mnt/user/appdata/lian-li-linux` |
 | LCD media (read-only) | `/media/lianli` | `/mnt/user/appdata/lian-li-linux/media` |
 | Unraid state (read-only) | `/host/emhttp` | `/var/local/emhttp` |
 | `WEB_PASSWORD` | | empty (no password) |
-| `VNC_PASSWORD` | | empty (no password) |
-| `FULL_APP_PORT` | | `6080` (host port for the dashboard's link to the full app) |
 | `PUID` / `PGID` | | `99` / `100` |
-| `DISPLAY_WIDTH` / `DISPLAY_HEIGHT` | | `1440` / `900` |
+| OpenRGB (optional) | `6743/tcp` | not published |
 | `LOG_LEVEL` | | `info` |
 
 **Privileged** is on. The daemon needs it for raw USB/HID access, and fan curves
@@ -91,29 +89,41 @@ Open `http://<server>:6090` on a phone or computer.
   state if you have a classic array. The **Storage** picker chooses whether the
   page and the Storage and Overview LCD screens show all storage or one pool.
   Charts show the last 24 hours of drive temperature, storage and fan speed.
-- **Fans:** fixed speed or a fan curve, per group or on all groups. Curves can be
-  created here and can follow the hottest drive, the average drive temperature,
-  the hottest drive in one pool, or a hardware temperature sensor. Speeds stop at
-  20% here, so fans can't be stopped by accident.
+- **Fans:** fixed speed or a fan curve, per group or on all groups, or set each fan
+  separately. Groups can follow the motherboard. Curves can be created here and can
+  follow the hottest drive, the average drive temperature, the hottest drive in one
+  pool, or a hardware temperature sensor. **Curve smoothing** stops fans hunting
+  around a curve point. Speeds stop at 20% here, so fans can't be stopped by accident.
+- **AIO:** this tab appears when an AIO is connected. Set the pump and radiator fans
+  to automatic, a fixed speed or a fan curve, or to follow the motherboard if the
+  AIO supports it. Fixed pump speeds stop at 30%. Curves can follow coolant
+  temperature on AIOs that report it. The pump screen's brightness, theme, rotation,
+  colours and sensors are also here.
 - **Lights:** effect, colours, brightness, speed and direction per fan group, or
-  all at once. **Saved setups** store a group's settings under a name.
-- **Screens:** what each LCD shows (an Unraid screen, your own file or a solid
-  colour), brightness, rotation and colours. Each pool has its own screen, and new
-  pools get one automatically. **Screen colours** offers themes or custom colours
-  and sets when gauges change colour. Upload files here, and start pixel cleaning.
+  all at once. Depending on the hardware, set each zone or region separately, colour
+  single LEDs, swap directions, change the LEDs per fan, or follow the motherboard.
+  **Presets** and **Saved setups** store lighting under a name. **Quick Sync** runs one
+  effect across several devices. The **OpenRGB server** lets OpenRGB control the
+  lights; it has no password, and you publish its port in the container settings.
+- **Screens:** what each LCD shows (an Unraid screen, your own design, a sensor gauge,
+  your own file or a solid colour), brightness, rotation and colours. Each pool has
+  its own screen, and new pools get one automatically. Files can be positioned and
+  zoomed, and videos can set their frame rate. **Startup image** sets what a screen
+  shows at power-on. **Screen designs** is a drag-and-drop designer with text, gauges,
+  bars, charts, clocks, images and video. **Template catalog** installs ready-made
+  designs from GitHub, and **Stored template files** clears out leftovers. **Screen
+  colours** offers themes or custom colours and sets when gauges change colour. Upload
+  files here, and start pixel cleaning.
 - **Auto:** schedules (brightness, optional screen swap, optional lights off) and
-  alerts that take over every screen for a hot drive, a disk problem, parity errors
-  or a nearly full pool. Muting lasts 24 hours. Schedules don't change fan speeds.
-- **System:** pair, unpair, identify and rename devices, general settings,
-  Installation Health, and a settings download.
+  alerts that take over every screen for a hot drive, a disk problem, parity errors,
+  a nearly full pool or hot AIO coolant. Muting lasts 24 hours. Schedules don't change fan speeds.
+- **System:** pair, unpair, take over, identify, rename and restart devices. General
+  settings include the USB backend and a temperature alert on the lights. **Restore a
+  backup** previews and restores the daemon's own backups. Also here: Installation
+  Health, a diagnostics report, an update check and a settings download.
 
-Not offered here: the template editor, AIO pages, OpenRGB, desktop mode and startup
-images. They stay in the full app. The settings download is for keeping a copy;
-there's no restore button.
-
-An LCD left on **Set in the full app** is only touched while an alert or a
-screen-swapping schedule is active, and is restored afterwards. An LCD given a
-screen here is kept on that screen, so change it here rather than in the full app.
+An LCD left on **Leave as it is** is only touched while an alert or a screen-swapping
+schedule is active, and is restored afterwards.
 
 Drive data comes from Unraid's own status files, so sleeping drives are never
 woken. When every drive is asleep, the LCD screens show the hottest drive as 0.
@@ -121,8 +131,8 @@ Alerts use Unraid's per-disk status, so ZFS pool health and scrub results aren't
 included.
 
 The API only offers fixed operations with validated values. It can't set sensor
-commands, because the daemon runs those as shell: fan curves can only follow the
-listed sensors. It still controls cooling and accepts file uploads, so set
+commands, because the daemon runs those as shell: curves, gauges and designs can only
+use the listed sensors. Screen files must be in the media or upload folders. It still controls cooling and accepts file uploads, so set
 `WEB_PASSWORD` unless you trust everyone on the network.
 
 A fan group that reads **0 RPM** is reporting 0 itself, over the radio. Check that
@@ -130,9 +140,8 @@ its fans have power and are plugged into the controller.
 
 Settings are stored in `extras/settings.json` in AppData, chart data in
 `extras/history.json` and uploads in `extras/media`. The current values are
-files in `/run/lianli-stats` inside the container. You can use them in your own
-templates and fan curves, for example with the sensor command
-`cat /run/lianli-stats/disk_temp_max`.
+files in `/run/lianli-stats` inside the container, and they appear in the sensor
+lists on the dashboard.
 
 ## How it works around the container check
 
@@ -160,16 +169,14 @@ The entrypoint also does what the distro packaging normally handles:
 
 ## Limitations
 
-- **Desktop mode / virtual display** (extending a desktop onto HydroShift II,
-  Lancool 207 or Universal Screen LCDs) doesn't work. It needs EVDI/Hermes-KMS
-  host kernel modules and a real graphical session. Cooling, RGB and LCD
-  playback of images, video, templates and gauges don't need it.
-- The GUI's **Settings → Configuration** service controls (enable user/system
-  service, switch modes) depend on systemd and pkexec, so they will show errors
-  or warnings. Ignore them: supervisord keeps the daemon running and restarts it.
-  For the same reason, **Installation Health** may flag systemd/udev items.
-- The GUI renders WebKit in software, so expect it to be a little slow over noVNC.
-  The daemon is unaffected.
+- **Desktop mode** (using a HydroShift II, Lancool 207 or Universal Screen LCD as a
+  monitor) can't work here. It needs a graphical login and kernel modules on the
+  host. A screen left in that mode gets a **Return to LCD mode** button.
+- **Service controls** from the desktop app (systemd and pkexec) aren't offered, because
+  supervisord keeps the daemon running. **Installation Health** may flag systemd/udev items.
+- The dashboard's upload replaces the desktop app's "import media" step.
+- The image still installs the libraries the upstream package depends on, so it's
+  smaller than before but not as small as it could be.
 - amd64 only (upstream ships amd64 packages only).
 
 ## Troubleshooting
@@ -189,7 +196,7 @@ Check the Unraid values the dashboard and LCD screens use:
 docker exec lian-li-linux sh -c 'grep . /run/lianli-stats/*'
 ```
 
-Upstream also ships a non-GUI diagnostic:
+Upstream also ships a diagnostic tool:
 
 ```bash
 docker exec -u lianli lian-li-linux lianli-control diagnose-runtime

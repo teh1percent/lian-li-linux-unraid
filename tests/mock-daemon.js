@@ -9,6 +9,10 @@ const READ_ONLY = new Set([
   'GetDaemonInfo', 'ListDevices', 'GetConfig', 'GetTelemetry', 'GetRgbCapabilities',
   'GetLcdTemplates', 'RenderTemplatePreview', 'ListSensors', 'ListDeviceProfiles',
   'GetInstallationHealth', 'GetWirelessOperation', 'GetPixelCleanPreparation',
+  'ListPwmHeaders', 'ListRgbPresets', 'GetZoneColors', 'ListStateBackups', 'PreviewStateBackup', 'RenderSensorPreview',
+  'SuggestSensorSources', 'GetCatalogInstallStatus', 'GetCatalogStorage', 'GetManagedMediaStorage',
+  'StartCatalogStorageReview', 'GetCatalogStorageReview', 'StartManagedMediaReview', 'GetManagedMediaReview',
+  'GetCatalogStorageRemoval', 'GetManagedMediaRemoval', 'GetStartupImageStatus',
 ]);
 // A one pixel JPEG, enough for an <img> to load.
 const JPEG = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAA//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AN//Z';
@@ -48,6 +52,17 @@ function createMockDaemon({ lcds = 3 } = {}) {
   }));
 
   state.fans = fans;
+  state.screens = screens;
+  // Extra capabilities per device, for the features only some hardware has.
+  state.caps = {};
+  state.pwmHeaders = [];
+  state.presets = [];
+  state.zoneColors = {};
+  state.backups = [];
+  state.startupStatus = null;
+  state.catalogStatus = null;
+  state.storage = [];
+  state.calls = [];
   // Tests add AIOs here, with their readings in state.telemetry.
   state.extra = [];
   state.telemetry = { fan_rpms: {}, coolant_temps: {} };
@@ -81,6 +96,7 @@ function createMockDaemon({ lcds = 3 } = {}) {
           { mode: 'Static', min_colors: 1, max_colors: 1, per_fan_colors: false, directions: [], supports_speed: false },
           { mode: 'Meteor', min_colors: 1, max_colors: 4, per_fan_colors: false, directions: ['Clockwise', 'CounterClockwise'], supports_speed: true },
         ],
+        ...state.caps[fan.device_id],
       })));
       case 'ListSensors': return ok(state.sensors);
       case 'ListDeviceProfiles': return ok(state.profiles);
@@ -129,6 +145,29 @@ function createMockDaemon({ lcds = 3 } = {}) {
       case 'SetFanConfig': state.config.fans = params.config; return ok();
       case 'SetRgbEffect': state.effects.push(params); return ok();
       case 'SetRgbConfig': state.config.rgb = params.config; return ok();
+      case 'ListPwmHeaders': return ok(state.pwmHeaders);
+      case 'ListRgbPresets': return ok(state.presets);
+      case 'SaveRgbPreset': state.presets.push({ name: params.name, device_id: params.device_id }); return ok();
+      case 'DeleteRgbPreset': state.presets = state.presets.filter((item) => item.name !== params.name); return ok();
+      case 'GetZoneColors': return ok(state.zoneColors[params.device_id] || []);
+      case 'SetRgbDirect': state.zoneColors[params.device_id] = params.colors; return ok();
+      case 'SetMergeLightingConfig': state.config.rgb.merge_lighting = params.config; return ok();
+      case 'ListStateBackups': return ok(state.backups);
+      case 'PreviewStateBackup': return ok({ sha256: 'a'.repeat(64), bytes: 2, json: '{"fans":{}}', truncated: false, parse_error: null, validation_error: null, warnings: [] });
+      case 'RenderSensorPreview': return ok({ jpeg_base64: JPEG });
+      case 'SetLcdTemplates': state.templates = params.templates; return ok();
+      case 'SuggestSensorSources': return ok(params.categories.map(() => ({ type: 'cpu_usage' })));
+      case 'StartCatalogInstall': state.catalogStatus = { operation_id: 4, template_id: params.template.id, finished: true, error: null }; state.lastInstall = params; return ok({ operation_id: 4 });
+      case 'GetCatalogInstallStatus': return ok(state.catalogStatus);
+      case 'GetCatalogStorage':
+      case 'GetManagedMediaStorage': return ok(state.storage);
+      case 'UploadStartupImage': state.startupStatus = { id: 3, device_id: params.device_id, status: { state: 'transferred' } }; return ok({ id: 3 });
+      case 'GetStartupImageStatus': return ok(state.startupStatus);
+      case 'SetEne6k77FanQuantity': case 'ApplyRgbPreset': case 'SetMbRgbSync': case 'SetFanDirection':
+      case 'RetryOpenRgb': case 'RestoreStateBackup': case 'DeleteStateBackup': case 'CancelStartupImage':
+      case 'ClearStartupImageRecovery': case 'SwitchDisplayMode': case 'RebootWirelessLcd':
+        state.calls.push({ method, params });
+        return ok();
       default: return { status: 'error', message: `Unhandled ${method}` };
     }
   }

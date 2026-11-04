@@ -37,6 +37,7 @@ const defaults = () => ({
   snapshots: {},
   baseBrightness: {},
   lightsSnapshot: null,
+  screenOptions: {},
 });
 
 class Store {
@@ -89,14 +90,25 @@ function screenMatches(entry, screen) {
   if (screen.kind === 'template') return entry.type === 'custom' && entry.template_id === screen.templateId;
   if (screen.kind === 'media') return entry.type === mediaType(screen.path) && entry.path === screen.path;
   if (screen.kind === 'color') return entry.type === 'color' && String(entry.rgb) === String(screen.rgb);
+  if (screen.kind === 'sensor') return entry.type === 'sensor';
   return false;
 }
 
-function lcdConfig(entry, device, screen) {
-  const base = { ...(entry || { serial: device.device_id, orientation: 0 }), path: null, fps: null, rgb: null, template_id: null };
-  if (screen.kind === 'template') return { ...base, type: 'custom', template_id: screen.templateId };
-  if (screen.kind === 'color') return { ...base, type: 'color', rgb: screen.rgb };
-  return { ...base, type: mediaType(screen.path), path: screen.path };
+function lcdConfig(entry, device, screen, options = {}) {
+  const { framing, smooth_edges: _smooth, custom_h264: _h264, aio_512_frame: _frame, sensor: _sensor, update_interval_ms: _interval, ...kept } = entry || { serial: device.device_id, orientation: 0 };
+  const base = { ...kept, path: null, fps: null, rgb: null, template_id: null };
+  const shared = options.aio_512_frame === undefined ? {} : { aio_512_frame: options.aio_512_frame };
+  if (screen.kind === 'template') {
+    const extra = {};
+    if (options.smooth_edges !== undefined) extra.smooth_edges = options.smooth_edges;
+    if (options.custom_h264 !== undefined) extra.custom_h264 = options.custom_h264;
+    return { ...base, ...shared, ...extra, type: 'custom', template_id: screen.templateId };
+  }
+  if (screen.kind === 'color') return { ...base, ...shared, type: 'color', rgb: screen.rgb };
+  if (screen.kind === 'sensor') return { ...base, ...shared, type: 'sensor', sensor: screen.sensor, update_interval_ms: options.interval ?? 1000 };
+  const type = mediaType(screen.path);
+  const moving = type === 'video' || type === 'gif';
+  return { ...base, ...shared, type, path: screen.path, ...(moving && options.fps ? { fps: options.fps } : {}), ...(options.framing ? { framing: options.framing } : {}) };
 }
 
 function findEntry(config, deviceId) {
@@ -117,6 +129,7 @@ class Engine {
     this.instance = null;
     this.installed = null;
     this.brightness = new Map();
+    this.applied = new Map();
     this.queue = Promise.resolve();
   }
 
@@ -165,7 +178,7 @@ class Engine {
       const screen = schedule.templateId ? { kind: 'template', templateId: schedule.templateId } : base;
       return { screen: themedScreen(screen), brightness: schedule.brightness ?? null, override: Boolean(schedule.templateId), reason: `schedule:${schedule.name}` };
     }
-    return { screen: themedScreen(base), brightness: null, override: false, reason: base.kind === 'keep' ? 'desktop app' : 'chosen screen' };
+    return { screen: themedScreen(base), brightness: null, override: false, reason: base.kind === 'keep' ? 'not managed' : 'chosen screen' };
   }
 
   tick() {
@@ -236,10 +249,15 @@ class Engine {
         delete snapshots[key];
         this.store.save();
       }
-      if (!screenMatches(entry, plan.screen)) {
-        const next = lcdConfig(entry, device, plan.screen);
+      // The daemon may fill in defaults, so gauges and options are compared with what was last sent.
+      const options = plan.override ? {} : (this.store.data.screenOptions[key] || {});
+      const detail = JSON.stringify([options, plan.screen.kind === 'sensor' ? plan.screen.sensor : null]);
+      const unchanged = this.applied.get(key) === detail || (!this.applied.has(key) && detail === '[{},null]');
+      if (!screenMatches(entry, plan.screen) || !unchanged) {
+        const next = lcdConfig(entry, device, plan.screen, options);
         await this.daemon.write('SetLcdMedia', { device_id: `serial:${next.serial}`, config: next });
       }
+      this.applied.set(key, detail);
     }
 
     if (plan.brightness !== null) {
@@ -268,7 +286,8 @@ class Engine {
       for (const device of rgb.devices) {
         if (!lights.some((item) => item.device_id === device.device_id)) continue;
         for (const zone of device.zones) {
-          await this.daemon.write('SetRgbEffect', { device_id: device.device_id, zone: zone.zone_index, effect: zone.effect });
+          // Saving the config already applied it. Regional devices refuse this call, which is fine.
+          await this.daemon.write('SetRgbEffect', { device_id: device.device_id, zone: zone.zone_index, effect: zone.effect }).catch(() => {});
         }
       }
     };
@@ -283,7 +302,8 @@ class Engine {
         const zones = existing?.zones?.length
           ? existing.zones
           : Array.from({ length: Math.max(device.rgb_zone_count || 1, 1) }, (_, zone) => ({ zone_index: zone, effect: {} }));
-        return { ...(existing || { device_id: device.device_id }), zones: zones.map((zone) => ({ ...zone, effect: { ...zone.effect, mode: 'Off' } })) };
+        const regions = existing?.regions?.length ? existing.regions.map((region) => ({ ...region, effect: { ...region.effect, mode: 'Off' } })) : existing?.regions;
+        return { ...(existing || { device_id: device.device_id }), regions, active_preset: null, zones: zones.map((zone) => ({ ...zone, effect: { ...zone.effect, mode: 'Off' } })) };
       });
       const others = known.filter((item) => !dark.some((device) => device.device_id === item.device_id));
       await send({ ...rgb, devices: [...others, ...dark] });

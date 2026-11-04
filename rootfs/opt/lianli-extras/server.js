@@ -9,9 +9,14 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
+const { BadRequest, check, isInt } = require('./lib/check');
 const { DaemonClient } = require('./lib/daemon');
 const { Engine, Store, mediaType, findEntry, ALERT_TEMPLATES } = require('./lib/engine');
+const { createFans, MIN_FAN_PERCENT } = require('./lib/fans');
 const { History } = require('./lib/history');
+const { createLights } = require('./lib/lights');
+const { createMaintenance } = require('./lib/maintenance');
+const { createScreens } = require('./lib/screens');
 const { buildTemplates } = require('./lib/templates');
 const { COLOR_KEYS, PRESETS, DEFAULT_LIMITS, isColor, validColors, pickColors, validLimits, themeExists, themeColors } = require('./lib/themes');
 const { readStats, selectStorage, writeStats } = require('./lib/unraid');
@@ -20,13 +25,12 @@ const STATS_INTERVAL_MS = 5000;
 const ENGINE_INTERVAL_MS = 15000;
 const HISTORY_INTERVAL_MS = 60000;
 const HISTORY_SAVE_EVERY = 10;
-const MAX_BODY = 64 * 1024;
+const MAX_BODY = 2 * 1024 * 1024;
 const MAX_UPLOAD = 512 * 1024 * 1024;
-const MIN_FAN_PERCENT = 20;
 const MAX_MUTE_HOURS = 168;
 const MAX_CURVES = 32;
 const MAX_CURVE_POINTS = 8;
-const BIND_TIMEOUT_MS = 20000;
+const BIND_TIMEOUT_MS = 60000;
 const PIXEL_MINUTES = [15, 30, 60, 120];
 const PIXEL_PREPARE_MS = 30000;
 const AIO_FAMILIES = new Set(['Galahad2Trinity', 'HydroShiftLcd', 'Galahad2Lcd', 'HydroShift2Lcd', 'HydroShift2OledCurveLed', 'WirelessAio']);
@@ -41,21 +45,12 @@ const AIO_SENSOR_TYPES = new Set(['hwmon', 'nvidia_gpu', 'amd_gpu_usage', 'wirel
 const HIDDEN_RGB_MODES = new Set(['Direct', 'Render', 'Paint', 'Voice']);
 const DIRECTIONS = new Set(['Clockwise', 'CounterClockwise', 'Up', 'Down', 'Spread', 'Gather']);
 const RESERVED_CURVE = /^(off$|__mb_sync__)/;
+const SCRIPTS = ['app.js', 'fans-more.js', 'lights-more.js', 'screens-more.js', 'designer.js', 'system-more.js', 'boot.js'];
 const STATIC_FILES = {
   '/': ['index.html', 'text/html; charset=utf-8'],
-  '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
+  ...Object.fromEntries(SCRIPTS.map((file) => [`/${file}`, [file, 'text/javascript; charset=utf-8']])),
 };
-
-class BadRequest extends Error {}
-
-function check(condition, message) {
-  if (!condition) throw new BadRequest(message);
-}
-
-function isInt(value, min, max) {
-  return Number.isInteger(value) && value >= min && value <= max;
-}
 
 function isAio(device) {
   return AIO_FAMILIES.has(device.family) || device.has_pump === true || device.has_pump_control === true;
@@ -106,6 +101,15 @@ function createApp({ daemon, engine, store, options, history }) {
     check(device, 'Unknown device');
     return device;
   };
+
+  const features = [
+    createFans({ daemon, findDevice, isAio }),
+    createLights({ daemon, findDevice, store }),
+    createMaintenance({ daemon, engine, options, fetchJson: options.fetchJson }),
+    createScreens({ daemon, engine, store, options, findDevice, download: options.download, listFonts: options.listFonts }),
+  ];
+  const screens = features[3];
+  const merged = (key) => Object.assign({}, ...features.map((feature) => feature[key] || {}));
 
   const knownTemplate = async (id) => {
     if (selectable().some((item) => item.id === id)) return true;
@@ -173,7 +177,6 @@ function createApp({ daemon, engine, store, options, history }) {
       time: engine.now().toISOString(),
       localTime: engine.now().toLocaleString(),
       timezone: process.env.TZ || 'UTC',
-      fullAppPort: options.fullAppPort,
       stats,
       settings: {
         schedules: shown.schedules, alerts: shown.alerts, screens: shown.screens, theme: shown.theme,
@@ -196,10 +199,13 @@ function createApp({ daemon, engine, store, options, history }) {
         daemon.request('ListDeviceProfiles').catch(() => []),
       ]);
       const sensors = await curveSensors(listed);
+      const context = { config, devices, telemetry, capabilities, listed, info };
+      const extras = Object.assign({}, ...(await Promise.all(features.map((feature) => feature.state?.(context)))));
       const fans = config.fans?.speeds || [];
       const rgbDevices = config.rgb?.devices || [];
       return {
         ...base,
+        ...extras,
         daemon: { connected: true, version: info.version, mode: info.mode },
         curves: (config.fan_curves || []).map((curve) => curve.name),
         curveDetails: (config.fan_curves || []).map((curve) => ({ name: curve.name, points: curve.curve, sensor: curveSensorId(curve, sensors) })),
@@ -207,12 +213,6 @@ function createApp({ daemon, engine, store, options, history }) {
         aioSensors: aioSensorList(listed).map((sensor) => ({ id: JSON.stringify(sensor.source), name: sensorName(sensor) })),
         profiles: profiles.map((profile) => ({ name: profile.name, deviceId: profile.device_id })),
         pixelClean: Object.values(telemetry.pixel_clean_statuses || {}).filter((item) => item.active),
-        daemonSettings: {
-          turnOffLcds: config.turn_off_lcds_on_shutdown !== false,
-          hardwareVideo: config.hardware_video === true,
-          rgbDrift: config.rgb_drift_detection_enabled !== false,
-          defaultFps: config.default_fps ?? null,
-        },
         devices: devices.map((device) => {
           const caps = capabilities.find((item) => item.device_id === device.device_id);
           const zone = rgbDevices.find((item) => item.device_id === device.device_id)?.zones?.[0];
@@ -220,6 +220,7 @@ function createApp({ daemon, engine, store, options, history }) {
           const rpms = splitRpms(device, telemetry);
           const aio = isAio(device);
           return {
+            ...Object.assign({}, ...features.map((feature) => feature.device?.(device, context))),
             id: device.device_id,
             name: store.data.names[device.device_id] || device.name,
             model: device.name,
@@ -229,6 +230,7 @@ function createApp({ daemon, engine, store, options, history }) {
             hasLcd: device.has_lcd,
             unbound: device.is_unbound_wireless,
             bindStatus: device.wireless_bind_status || null,
+            needsRebind: device.needs_rebind === true,
             foreignOnline: device.foreign_master_online === true,
             firmware: device.firmware_version || null,
             fanCount: device.fan_count,
@@ -247,29 +249,8 @@ function createApp({ daemon, engine, store, options, history }) {
         }),
       };
     } catch (error) {
-      return { ...base, daemon: { connected: false, error: error.message }, curves: [], curveDetails: [], sensors: [], aioSensors: [], profiles: [], pixelClean: [], daemonSettings: null, devices: [] };
+      return { ...base, daemon: { connected: false, error: error.message }, curves: [], curveDetails: [], sensors: [], aioSensors: [], profiles: [], pixelClean: [], daemonSettings: null, devices: [], capabilities: [], pwmHeaders: [], fanTuning: null, rgbPresets: [], quickSync: null, matchedModes: [], syncDevices: [], sources: [], designs: [], screenOptions: {}, startupRecovery: [] };
     }
-  }
-
-  async function setFan(body) {
-    const device = await findDevice(body.device_id);
-    check(device.has_fan && !device.is_unbound_wireless, 'This device has no controllable fans');
-    check(!isAio(device), 'Set this one on the AIO page');
-    const config = await daemon.request('GetConfig');
-    let speed;
-    if (body.mode === 'constant') {
-      check(isInt(body.percent, MIN_FAN_PERCENT, 100), `Speed must be ${MIN_FAN_PERCENT} to 100%`);
-      speed = Math.round((body.percent / 100) * 255);
-    } else {
-      check(body.mode === 'curve', 'Unknown fan mode');
-      check((config.fan_curves || []).some((curve) => curve.name === body.curve), 'Unknown fan curve');
-      speed = body.curve;
-    }
-    const slots = Math.min(device.fan_count || 4, 4);
-    const speeds = Array.from({ length: 4 }, (_, slot) => (slot < slots ? speed : 0));
-    const fans = config.fans || { speeds: [] };
-    const others = (fans.speeds || []).filter((group) => group.device_id !== device.device_id);
-    await daemon.write('SetFanConfig', { config: { ...fans, speeds: [...others, { device_id: device.device_id, speeds }] } });
   }
 
   async function saveCurve(body) {
@@ -410,6 +391,13 @@ function createApp({ daemon, engine, store, options, history }) {
     const options_ = { mode: body.mode, colors, brightness: body.brightness, disabled: false };
     if (body.speed !== undefined) options_.speed = body.speed;
     if (body.direction !== undefined) options_.direction = body.direction;
+    entry.active_preset = null;
+    // Regional devices take one effect for the whole device, and refuse per-zone calls.
+    if ((caps.effect_regions || []).length) {
+      entry.regions = [{ effect: { ...(entry.regions?.[0]?.effect || {}), ...options_, scope: 'All' }, flip: false }];
+      return daemon.write('SetRgbConfig', { config: { ...rgb, devices } });
+    }
+    entry.regions = null;
     const zoneCount = Math.max(device.rgb_zone_count || 1, 1);
     for (let zone = 0; zone < zoneCount; zone += 1) {
       const existing = entry.zones.find((item) => item.zone_index === zone);
@@ -433,6 +421,10 @@ function createApp({ daemon, engine, store, options, history }) {
   async function setDevice(body) {
     const device = await findDevice(body.device_id);
     if (body.action === 'identify') return daemon.write('PingDevice', { device_id: device.device_id, zone: 0 });
+    if (body.action === 'reboot') {
+      check(device.device_id.startsWith('wireless:') && device.has_lcd, 'Only wireless LCDs can be restarted here');
+      return daemon.write('RebootWirelessLcd', { device_id: device.device_id });
+    }
     if (body.action === 'rename') {
       const name = typeof body.name === 'string' ? body.name.trim() : '';
       check(name.length <= 40, 'Names can be up to 40 characters');
@@ -441,9 +433,9 @@ function createApp({ daemon, engine, store, options, history }) {
       return store.save();
     }
     check(body.action === 'bind' || body.action === 'unbind', 'Unknown action');
-    check(device.device_id.startsWith('wireless:'), 'Only wireless devices can be paired');
+    check(/^wireless(-unbound)?:/.test(device.device_id), 'Only wireless devices can be paired');
     check(!device.foreign_master_online, 'Another controller owns this device and is switched on. Turn that controller off first.');
-    const mac = device.device_id.slice('wireless:'.length);
+    const mac = device.device_id.replace(/^wireless(-unbound)?:/, '');
     const queued = await daemon.write(body.action === 'bind' ? 'BindWirelessDevice' : 'UnbindWirelessDevice', { mac });
     if (!queued?.operation_id) return null;
     const deadline = Date.now() + BIND_TIMEOUT_MS;
@@ -465,6 +457,8 @@ function createApp({ daemon, engine, store, options, history }) {
     } else if (screen.kind === 'template') {
       check(await knownTemplate(screen.templateId), 'Unknown screen');
       store.data.screens[device.device_id] = { kind: 'template', templateId: screen.templateId };
+    } else if (screen.kind === 'sensor') {
+      store.data.screens[device.device_id] = { kind: 'sensor', sensor: await screens.cleanSensor(screen.sensor) };
     } else if (screen.kind === 'color') {
       check(isColor(screen.rgb), 'Invalid colour');
       store.data.screens[device.device_id] = { kind: 'color', rgb: screen.rgb };
@@ -551,19 +545,6 @@ function createApp({ daemon, engine, store, options, history }) {
     } finally {
       if (!started) await daemon.write('StopPixelClean', { device_id: null, session_id: first.session_id }).catch(() => {});
     }
-  }
-
-  async function setDaemonSettings(body) {
-    const config = await daemon.request('GetConfig');
-    const next = { ...config };
-    if (body.turnOffLcds !== undefined) next.turn_off_lcds_on_shutdown = body.turnOffLcds === true;
-    if (body.hardwareVideo !== undefined) next.hardware_video = body.hardwareVideo === true;
-    if (body.rgbDrift !== undefined) next.rgb_drift_detection_enabled = body.rgbDrift === true;
-    if (body.defaultFps !== undefined) {
-      check(isInt(body.defaultFps, 1, 60), 'Frame rate must be 1 to 60');
-      next.default_fps = body.defaultFps;
-    }
-    await daemon.write('SetConfig', { config: next });
   }
 
   async function setStorage(body) {
@@ -685,7 +666,6 @@ function createApp({ daemon, engine, store, options, history }) {
   const queued = (handler) => (body) => engine.enqueue(() => handler(body));
 
   const routes = {
-    '/api/fan': queued(setFan),
     '/api/curve': queued(saveCurve),
     '/api/curve/delete': queued(deleteCurve),
     '/api/rgb': queued(setRgb),
@@ -696,13 +676,20 @@ function createApp({ daemon, engine, store, options, history }) {
     '/api/lcd': setLcd,
     '/api/theme': setTheme,
     '/api/pixel': setPixel,
-    '/api/settings': queued(setDaemonSettings),
     '/api/storage': setStorage,
     '/api/schedules': setSchedules,
     '/api/alerts': setAlerts,
     '/api/alerts/mute': muteAlerts,
     '/api/media/delete': deleteMedia,
   };
+  // Feature handlers read and rewrite the config too, so they queue unless they wait on the engine.
+  const unqueued = new Set(features.flatMap((feature) => [...(feature.unqueued || [])]));
+  const guard = (table) => Object.fromEntries(Object.entries(table).map(([route, handler]) => [route, unqueued.has(route) ? handler : queued(handler)]));
+  Object.assign(routes, guard(merged('routes')));
+  const dataRoutes = guard(merged('dataRoutes'));
+  const getRoutes = merged('gets');
+  const binaryRoutes = merged('binary');
+  const downloads = merged('downloads');
 
   function send(res, status, type, body, headers = {}) {
     res.writeHead(status, {
@@ -781,11 +768,23 @@ function createApp({ daemon, engine, store, options, history }) {
         if (!rendered) return sendJson(res, 404, { error: 'Unknown screen' });
         return send(res, 200, 'image/jpeg', Buffer.from(rendered.jpeg_base64, 'base64'));
       }
-      if (req.method === 'POST' && (routes[url.pathname] || url.pathname === '/api/upload')) {
+      if (req.method === 'GET' && getRoutes[url.pathname]) {
+        return sendJson(res, 200, await getRoutes[url.pathname](url));
+      }
+      if (req.method === 'GET' && binaryRoutes[url.pathname]) {
+        const { type, body } = await binaryRoutes[url.pathname](url);
+        return send(res, 200, type, body);
+      }
+      if (req.method === 'GET' && downloads[url.pathname]) {
+        const { name, body } = await downloads[url.pathname]();
+        return send(res, 200, 'application/json', body, { 'Content-Disposition': `attachment; filename="${name}"` });
+      }
+      if (req.method === 'POST' && (routes[url.pathname] || dataRoutes[url.pathname] || url.pathname === '/api/upload')) {
         // A custom header cannot be sent cross-site without a CORS approval,
         // which this server never gives, so other web pages cannot post here.
         if (req.headers['x-lianli-dashboard'] !== '1') return sendJson(res, 403, { error: 'Forbidden' });
         if (url.pathname === '/api/upload') return sendJson(res, 200, await upload(req, url));
+        if (dataRoutes[url.pathname]) return sendJson(res, 200, (await dataRoutes[url.pathname](await readBody(req))) ?? null);
         await routes[url.pathname](await readBody(req));
         return sendJson(res, 200, { ok: true });
       }
@@ -809,7 +808,8 @@ function main() {
     mediaDir: env.MEDIA_DIR || '/media/lianli',
     uploadDir: env.UPLOAD_DIR || '/var/lib/lianli/extras/media',
     port: Number(env.WEB_PORT) || 6090,
-    fullAppPort: Number(env.FULL_APP_PORT) || 6080,
+    templatesDir: env.TEMPLATES_DIR || '/var/lib/lianli/templates',
+    logFile: env.DAEMON_LOG || '/run/lianli-logs/daemon.log',
     password: env.WEB_PASSWORD || '',
   };
 

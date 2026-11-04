@@ -24,20 +24,13 @@ install -m 0666 -o root -g root /dev/null /run/lianli-control.lock
 install -d -m 0755 -o lianli -g lianli /run/lianli
 install -d -m 0750 -o lianli -g lianli /var/lib/lianli
 chown -R lianli:lianli /var/lib/lianli
-install -d -m 0700 -o lianli -g lianli /tmp/runtime-lianli
 install -d -m 0755 -o lianli -g lianli /home/lianli
 install -d -m 0755 -o lianli -g lianli /run/lianli-stats
+install -d -m 0755 /run/lianli-logs
+install -m 0644 /dev/null /run/lianli-logs/daemon.log
 usermod -d /home/lianli lianli 2>/dev/null || true
 
 # Device nodes must exist with lianli group access before the daemon starts.
 /usr/local/bin/sync-devices.sh --once
-
-if [ -n "${VNC_PASSWORD:-}" ]; then
-    install -d -m 0700 /root/.vnc
-    x11vnc -storepasswd "$VNC_PASSWORD" /root/.vnc/passwd >/dev/null
-    export X11VNC_AUTH="-rfbauth /root/.vnc/passwd"
-else
-    export X11VNC_AUTH="-nopw"
-fi
 
 exec /usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf

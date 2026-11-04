@@ -43,7 +43,7 @@ beforeEach(async () => {
   fs.mkdirSync(media);
   fs.writeFileSync(path.join(media, 'logo.png'), 'x');
   fs.writeFileSync(path.join(media, 'notes.txt'), 'x');
-  http = createApp({ daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: media, uploadDir: path.join(dir, 'uploads'), fullAppPort: 6081, password: '' } });
+  http = createApp({ daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: media, uploadDir: path.join(dir, 'uploads'), password: '' } });
   await listen(http, 0);
   base = `http://127.0.0.1:${http.address().port}`;
 });
@@ -576,6 +576,7 @@ test('settings change only what was asked and keep the rest of the config', asyn
   assert.strictEqual(mock.state.config.fan_curves.length, 1);
   assert.strictEqual((await call('/api/settings', { defaultFps: 500 })).status, 400);
   assert.strictEqual(mock.state.config.default_fps, 30);
+  assert.strictEqual((await call('/api/settings', { defaultFps: 120 })).status, 200);
 });
 
 test('the storage alert watches the fullest pool, whichever one the screens show', async () => {
@@ -782,7 +783,7 @@ test('the coolant alert takes over the screens, and its limit can be saved', asy
 });
 
 test('password protection applies to everything when set', async () => {
-  const locked = createApp({ daemon: engine.daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: dir, fullAppPort: 6081, password: 'secret' } });
+  const locked = createApp({ daemon: engine.daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: dir, password: 'secret' } });
   await listen(locked, 0);
   const url = `http://127.0.0.1:${locked.address().port}`;
   try {
@@ -794,5 +795,156 @@ test('password protection applies to everything when set', async () => {
     assert.strictEqual((await fetch(`${url}/`, { headers: { Authorization: right } })).status, 200);
   } finally {
     await new Promise((resolve) => locked.close(resolve));
+  }
+});
+
+// Everything the desktop app used to do ----------------------------------------
+
+const SCREEN = 'usb:1-2';
+const stateOf = async () => (await call('/api/state')).json();
+
+test('every page script is served and nothing links to the old desktop app', async () => {
+  const page = await (await call('/')).text();
+  for (const name of ['app', 'fans-more', 'lights-more', 'screens-more', 'designer', 'system-more', 'boot']) {
+    assert.ok(page.includes(`/${name}.js`), name);
+    const served = await call(`/${name}.js`);
+    assert.strictEqual(served.status, 200, name);
+    assert.ok(!/full app|fullApp|vnc/i.test(await served.text()), name);
+  }
+  assert.ok(!/full app|fullApp|vnc/i.test(page));
+});
+
+test('each fan can run its own speed, and groups can follow the motherboard', async () => {
+  const slots = [{ mode: 'constant', percent: 50 }, { mode: 'curve', curve: 'Quiet' }, { mode: 'constant', percent: 100 }];
+  assert.strictEqual((await call('/api/fan', { device_id: FAN, slots })).status, 200);
+  const saved = mock.state.config.fans.speeds.find((item) => item.device_id === FAN);
+  assert.strictEqual(saved.speeds[1], 'Quiet');
+  assert.notStrictEqual(saved.speeds[0], saved.speeds[2]);
+  mock.state.pwmHeaders = [{ id: 'hwmon3/pwm1', label: 'CHA1' }];
+  assert.strictEqual((await call('/api/fan', { device_id: FAN, mode: 'mb', header: 'hwmon3/pwm1' })).status, 200);
+  assert.ok(mock.state.config.fans.speeds.find((item) => item.device_id === FAN).speeds[0].startsWith('__mb_sync__:hwmon3/pwm1'));
+  assert.strictEqual((await call('/api/fan', { device_id: FAN, mode: 'mb', header: '../../etc/passwd' })).status, 400);
+  assert.strictEqual((await call('/api/fan/tuning', { hysteresisTemp: 2 })).status, 200);
+  assert.strictEqual((await call('/api/fan/tuning', { hysteresisTemp: 50 })).status, 400);
+});
+
+test('zones, presets and single LEDs reach the daemon', async () => {
+  mock.state.caps[FAN] = { zones: [{ name: 'A', led_count: 2 }, { name: 'B', led_count: 2 }], supports_direct: true, software_modes: ['Direct'] };
+  const effect = { mode: 'Meteor', colors: [[1, 2, 3]], speed: 1, brightness: 2 };
+  assert.strictEqual((await call('/api/rgb/zone', { device_id: FAN, zone: 1, effect })).status, 200);
+  const entry = mock.state.config.rgb.devices.find((item) => item.device_id === FAN);
+  assert.strictEqual(entry.zones[1].effect.mode, 'Meteor');
+  assert.strictEqual(entry.zones[0].effect.mode, 'Static');
+  assert.strictEqual((await call('/api/rgb/zone', { device_id: FAN, zone: 9, effect })).status, 400);
+  assert.strictEqual((await call('/api/rgb/zone', { device_id: FAN, zone: 0, effect: { ...effect, mode: 'Nope' } })).status, 400);
+  assert.strictEqual((await call('/api/rgb/leds', { device_id: FAN, zone: 0, colors: [[9, 9, 9], [8, 8, 8]] })).status, 200);
+  assert.deepStrictEqual(await (await call(`/api/rgb/leds?device_id=${FAN}&zone=0`)).json(), [[9, 9, 9], [8, 8, 8]]);
+  assert.ok(mock.state.presets.some((item) => item.name === 'Custom LEDs'), 'colours survive a restart');
+  assert.strictEqual((await call('/api/rgb/preset', { action: 'save', device_id: FAN, name: 'Mine' })).status, 200);
+  assert.ok((await stateOf()).rgbPresets.some((item) => item.name === 'Mine' && item.deviceId === FAN));
+  assert.strictEqual((await call('/api/rgb/preset', { action: 'delete', device_id: FAN, name: 'Mine' })).status, 200);
+  assert.ok(!mock.state.presets.some((item) => item.name === 'Mine'));
+});
+
+test('Quick Sync needs two compatible devices', async () => {
+  const [one, two] = mock.state.fans.map((fan) => fan.device_id);
+  mock.state.caps[one] = { sync_led_count: 10 };
+  mock.state.caps[two] = { sync_led_count: 10 };
+  const body = { enabled: true, kind: 'Continuous', mode: 'Meteor', colors: [[1, 1, 1]], speed: 2, brightness: 4, reversed: [two] };
+  assert.strictEqual((await call('/api/rgb/sync', { ...body, devices: [one] })).status, 400);
+  assert.strictEqual((await call('/api/rgb/sync', { ...body, devices: [one, two] })).status, 200);
+  const saved = mock.state.config.rgb.merge_lighting;
+  assert.deepStrictEqual(saved.device_order, [one, two]);
+  assert.deepStrictEqual(saved.directions, ['Clockwise', 'CounterClockwise']);
+  assert.strictEqual((await call('/api/rgb/sync', { ...body, devices: [one, 'wireless:nope'] })).status, 400);
+});
+
+test('screens can never be given a command or a file outside the media folders', async () => {
+  const sensor = { source: { type: 'command', cmd: 'rm -rf /' } };
+  assert.strictEqual((await call('/api/screen', { device_id: SCREEN, screen: { kind: 'sensor', sensor } })).status, 400);
+  const template = (widget) => ({ id: 'user-1', name: 'X', base_width: 400, base_height: 400, background: { type: 'color', rgb: [0, 0, 0, 255] }, widgets: [widget], rotated: false, target_device: null });
+  const box = { id: 'w', x: 10, y: 10, width: 10, height: 10, rotation: 0, visible: true };
+  const command = { ...box, kind: { type: 'value_text', source: { type: 'command', cmd: 'id' } } };
+  const traversal = { ...box, kind: { type: 'image', path: '/etc/passwd', opacity: 1, fit: 'stretch' } };
+  assert.strictEqual((await call('/api/design/save', { template: template(command) })).status, 400);
+  assert.strictEqual((await call('/api/design/save', { template: template(traversal) })).status, 400);
+  assert.strictEqual((await call('/api/design/preview', { template: template(traversal) })).status, 400);
+  assert.strictEqual(mock.state.writes.filter((item) => item.method === 'MergeLcdTemplates').length, 0);
+});
+
+test('designs save, show up as a screen choice and delete', async () => {
+  const schema = (await (await call('/api/design/schema')).json()).widgets;
+  const box = (kind) => ({ id: `w-${kind}`, kind: schema[kind], x: 200, y: 200, width: 100, height: 100, rotation: 0, visible: true });
+  const kinds = Object.keys(schema).filter((kind) => kind !== 'image' && kind !== 'video');
+  const template = { id: 'user-2', name: 'Everything', base_width: 400, base_height: 400, background: { type: 'color', rgb: [0, 0, 0, 255] }, widgets: kinds.map(box), rotated: false, target_device: null };
+  const saved = await call('/api/design/save', { template });
+  assert.strictEqual(saved.status, 200, await saved.clone().text());
+  assert.ok((await stateOf()).designs.some((item) => item.id === 'user-2'));
+  assert.strictEqual((await call('/api/design/delete', { id: 'user-2' })).status, 200);
+  assert.ok(!(await stateOf()).designs.some((item) => item.id === 'user-2'));
+});
+
+test('a sensor gauge saves and previews', async () => {
+  const sensor = { source: { type: 'cpu_usage' }, label: 'CPU', unit: '%' };
+  const preview = await call('/api/lcd/sensor-preview', { sensor, width: 400, height: 400 });
+  assert.strictEqual(preview.status, 200, await preview.clone().text());
+  assert.ok((await preview.json()).jpeg_base64);
+  assert.strictEqual((await call('/api/screen', { device_id: SCREEN, screen: { kind: 'sensor', sensor } })).status, 200);
+  await engine.tick();
+  assert.ok(mock.state.config.lcds.some((lcd) => lcd.type === 'sensor'));
+});
+
+test('startup images must be a JPEG of exactly the right size', async () => {
+  const device = mock.state.screens[0];
+  device.startup_image = { width: 400, height: 400, max_jpeg_bytes: 200000, jpeg_target_bytes: 150000 };
+  const onePixel = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAA//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AN//Z';
+  assert.strictEqual((await call('/api/startup-image', { device_id: SCREEN, jpeg_base64: onePixel })).status, 400);
+  assert.strictEqual((await call('/api/startup-image', { device_id: SCREEN, jpeg_base64: 'bm90IGEganBlZw==' })).status, 400);
+});
+
+test('backups only restore with the checksum that was previewed', async () => {
+  const target = { kind: 'configuration' };
+  const preview = await (await call('/api/backups/preview', { target, preserved: false })).json();
+  assert.strictEqual((await call('/api/backups/restore', { target, sha256: preview.sha256 })).status, 200);
+  assert.strictEqual(mock.state.calls.at(-1).method, 'RestoreStateBackup');
+  assert.strictEqual((await call('/api/backups/restore', { target: { kind: 'other' }, sha256: 'abc' })).status, 400);
+  assert.strictEqual((await call('/api/backups/restore', { target })).status, 400);
+});
+
+test('settings cover alerts, the USB backend and the OpenRGB server', async () => {
+  assert.strictEqual((await call('/api/settings', { hidBackend: 'rusb', openrgb: { enabled: true, port: 7000, regions: false, perFan: false }, thermal: { cpu: { enabled: true, threshold: 90, color: [255, 0, 0] } } })).status, 200);
+  assert.strictEqual(mock.state.config.rgb.openrgb_port, 7000);
+  assert.strictEqual((await call('/api/settings', { hidBackend: 'nope' })).status, 400);
+  assert.strictEqual((await call('/api/settings', { openrgb: { enabled: true, port: 99999, regions: false, perFan: false } })).status, 400);
+});
+
+test('the diagnostics report downloads', async () => {
+  const report = await call('/api/diagnostics');
+  assert.strictEqual(report.status, 200);
+  assert.ok((await report.text()).includes('1.2.3'));
+});
+
+test('catalog templates install only when their checksum matches', async () => {
+  const sha = (text) => require('node:crypto').createHash('sha256').update(text).digest('hex');
+  let body = JSON.stringify({ widgets: [{ sensor_category: 'cpu_temp', kind: { source: { type: 'cpu_usage' } } }] });
+  const templateSha = sha(body);
+  const manifest = () => JSON.stringify({ schema_version: 1, templates: [{ id: 'cat', name: 'Cat', folder: 'cat', template_file: 't.json', template_sha256: templateSha, preview: 'p.png', preview_sha256: sha('png'), base_width: 400, base_height: 400 }] });
+  const download = async (url) => Buffer.from(url.endsWith('default_templates.json') ? manifest() : url.endsWith('t.json') ? body : 'png');
+  const options = { statsDir: '/run/lianli-stats', mediaDir: dir, uploadDir: path.join(dir, 'uploads'), password: '', download };
+  const server = createApp({ daemon: engine.daemon, engine, store, options });
+  await listen(server, 0);
+  const local = async (url, payload) => fetch(`http://127.0.0.1:${server.address().port}${url}`, { method: payload ? 'POST' : 'GET', headers: { 'X-Lianli-Dashboard': '1' }, body: payload && JSON.stringify(payload) });
+  try {
+    assert.strictEqual((await (await local('/api/catalog')).json())[0].id, 'cat');
+    assert.strictEqual((await local('/api/catalog/preview?id=cat')).headers.get('content-type'), 'image/png');
+    const prepared = await (await local('/api/catalog/prepare', { id: 'cat' })).json();
+    assert.strictEqual(prepared.categories[0].category, 'cpu_temp');
+    assert.strictEqual((await local('/api/catalog/install', { id: 'cat', bindings: { cpu_temp: '{"type":"command","cmd":"id"}' } })).status, 400);
+    assert.strictEqual((await local('/api/catalog/install', { id: 'cat', bindings: { cpu_temp: prepared.categories[0].suggested } })).status, 200);
+    assert.strictEqual(mock.state.lastInstall.template.id, 'cat');
+    body = 'tampered';
+    assert.notStrictEqual((await local('/api/catalog/prepare', { id: 'cat' })).status, 200);
+  } finally {
+    server.close();
   }
 });
