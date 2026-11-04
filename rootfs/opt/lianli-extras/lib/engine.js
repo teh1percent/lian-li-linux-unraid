@@ -7,7 +7,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { installTemplates } = require('./templates');
+const { installTemplates, wantedTemplates, themedId } = require('./templates');
+const { DEFAULT_LIMITS } = require('./themes');
 
 const TEMP_CLEAR_MARGIN = 2;
 const MEDIA_TYPES = {
@@ -18,6 +19,7 @@ const MEDIA_TYPES = {
 const ALERT_TEMPLATES = {
   disk: 'unraid_alert_disk',
   parity: 'unraid_alert_parity',
+  storage: 'unraid_alert_storage',
   temp: 'unraid_alert_temp',
 };
 
@@ -25,9 +27,15 @@ const defaults = () => ({
   screens: {},
   storageVolume: 'all',
   schedules: [],
-  alerts: { enabled: false, diskTempC: 50, diskProblem: true, parityErrors: true, muteUntil: 0 },
+  alerts: { enabled: false, diskTempC: 50, diskProblem: true, parityErrors: true, storageFull: true, storagePct: 90, muteUntil: 0 },
+  theme: 'default',
+  customColors: null,
+  lcdThemes: {},
+  limits: { ...DEFAULT_LIMITS },
+  names: {},
   snapshots: {},
   baseBrightness: {},
+  lightsSnapshot: null,
 });
 
 class Store {
@@ -79,13 +87,20 @@ function screenMatches(entry, screen) {
   if (!entry) return false;
   if (screen.kind === 'template') return entry.type === 'custom' && entry.template_id === screen.templateId;
   if (screen.kind === 'media') return entry.type === mediaType(screen.path) && entry.path === screen.path;
+  if (screen.kind === 'color') return entry.type === 'color' && String(entry.rgb) === String(screen.rgb);
   return false;
 }
 
 function lcdConfig(entry, device, screen) {
   const base = { ...(entry || { serial: device.device_id, orientation: 0 }), path: null, fps: null, rgb: null, template_id: null };
   if (screen.kind === 'template') return { ...base, type: 'custom', template_id: screen.templateId };
+  if (screen.kind === 'color') return { ...base, type: 'color', rgb: screen.rgb };
   return { ...base, type: mediaType(screen.path), path: screen.path };
+}
+
+function findEntry(config, deviceId) {
+  const wanted = normalizeId(deviceId);
+  return (config.lcds || []).find((lcd) => normalizeId(lcd.serial) === wanted) || null;
 }
 
 class Engine {
@@ -98,6 +113,7 @@ class Engine {
     this.tempAlert = false;
     this.lastError = null;
     this.instance = null;
+    this.installed = null;
     this.brightness = new Map();
     this.queue = Promise.resolve();
   }
@@ -117,6 +133,7 @@ class Engine {
     if (alerts.muteUntil > this.now().getTime()) return null;
     if (alerts.diskProblem && (values.disks_bad > 0 || values.disk_errors > 0)) return 'disk';
     if (alerts.parityErrors && values.parity_errors > 0) return 'parity';
+    if (alerts.storageFull && values.volume_max_used_pct >= alerts.storagePct) return 'storage';
     return this.tempAlert ? 'temp' : null;
   }
 
@@ -124,15 +141,25 @@ class Engine {
     return this.store.data.schedules.find((schedule) => scheduleActive(schedule, this.now())) || null;
   }
 
+  // The copy of a screen in this LCD's own theme, when it has one.
+  themed(deviceId, templateId) {
+    const { lcdThemes, theme } = this.store.data;
+    const own = lcdThemes[deviceId];
+    if (!own || own === theme || !templateId.startsWith('unraid_')) return templateId;
+    return themedId(templateId, own);
+  }
+
   // What should be on this LCD right now and why.
   plan(device, alert, schedule) {
     const base = this.store.data.screens[device.device_id] || { kind: 'keep' };
+    const themedScreen = (screen) => (screen.kind === 'template'
+      ? { ...screen, templateId: this.themed(device.device_id, screen.templateId) } : screen);
     if (alert) return { screen: { kind: 'template', templateId: ALERT_TEMPLATES[alert] }, brightness: 100, override: true, reason: `alert:${alert}` };
     if (schedule) {
       const screen = schedule.templateId ? { kind: 'template', templateId: schedule.templateId } : base;
-      return { screen, brightness: schedule.brightness, override: Boolean(schedule.templateId), reason: `schedule:${schedule.name}` };
+      return { screen: themedScreen(screen), brightness: schedule.brightness ?? null, override: Boolean(schedule.templateId), reason: `schedule:${schedule.name}` };
     }
-    return { screen: base, brightness: null, override: false, reason: base.kind === 'keep' ? 'desktop app' : 'chosen screen' };
+    return { screen: themedScreen(base), brightness: null, override: false, reason: base.kind === 'keep' ? 'desktop app' : 'chosen screen' };
   }
 
   tick() {
@@ -149,11 +176,12 @@ class Engine {
   async run() {
     const info = await this.daemon.request('GetDaemonInfo');
     if (info.instance_id !== this.instance) this.brightness.clear();
-    // Pool screens are generated, so a new pool needs installing too.
+    // Screens are generated, so new pools and new colours need installing too.
     const { volumes = [] } = this.getStats();
-    const installed = JSON.stringify([info.instance_id, volumes.map((volume) => volume.key)]);
+    const { theme, customColors, lcdThemes, limits } = this.store.data;
+    const installed = JSON.stringify([info.instance_id, volumes.map((volume) => volume.key), theme, customColors, lcdThemes, limits]);
     if (installed !== this.installed) {
-      await installTemplates(this.daemon, this.statsDir, volumes);
+      await installTemplates(this.daemon, wantedTemplates(this.statsDir, volumes, this.store.data));
       this.installed = installed;
     }
     this.instance = info.instance_id;
@@ -161,16 +189,20 @@ class Engine {
       this.daemon.request('ListDevices'),
       this.daemon.request('GetConfig'),
     ]);
-    const lcds = devices.filter((device) => device.has_lcd);
     const alert = this.alert();
     const schedule = this.activeSchedule();
     const errors = [];
-    for (const device of lcds) {
+    for (const device of devices.filter((item) => item.has_lcd)) {
       try {
         await this.applyTo(device, config, alert, schedule);
       } catch (error) {
         errors.push(`${device.name}: ${error.message}`);
       }
+    }
+    try {
+      await this.applyLights(devices, config, Boolean(schedule?.lightsOff));
+    } catch (error) {
+      errors.push(`Lights: ${error.message}`);
     }
     if (errors.length) throw new Error(errors.join('; '));
   }
@@ -178,16 +210,13 @@ class Engine {
   async applyTo(device, config, alert, schedule) {
     const { snapshots, baseBrightness } = this.store.data;
     const key = device.device_id;
-    const wanted = normalizeId(key);
-    const entry = (config.lcds || []).find((lcd) => normalizeId(lcd.serial) === wanted) || null;
+    const entry = findEntry(config, key);
     const plan = this.plan(device, alert, schedule);
-    let dirty = false;
 
     if (plan.override && !(key in snapshots)) {
       snapshots[key] = entry;
-      dirty = true;
+      this.store.save();
     }
-    if (dirty) this.store.save();
 
     if (plan.screen.kind === 'keep') {
       if (key in snapshots) {
@@ -224,16 +253,52 @@ class Engine {
     }
   }
 
+  // Lights-off schedules save the lighting setup, and put it back afterwards.
+  async applyLights(devices, config, off) {
+    const { store } = this;
+    const lights = devices.filter((device) => device.has_rgb && !device.is_unbound_wireless);
+    const send = async (rgb) => {
+      await this.daemon.write('SetRgbConfig', { config: rgb });
+      for (const device of rgb.devices) {
+        if (!lights.some((item) => item.device_id === device.device_id)) continue;
+        for (const zone of device.zones) {
+          await this.daemon.write('SetRgbEffect', { device_id: device.device_id, zone: zone.zone_index, effect: zone.effect });
+        }
+      }
+    };
+
+    if (off && !store.data.lightsSnapshot) {
+      const rgb = config.rgb || { enabled: true, devices: [] };
+      store.data.lightsSnapshot = rgb;
+      store.save();
+      const known = rgb.devices || [];
+      const dark = lights.map((device) => {
+        const existing = known.find((item) => item.device_id === device.device_id);
+        const zones = existing?.zones?.length
+          ? existing.zones
+          : Array.from({ length: Math.max(device.rgb_zone_count || 1, 1) }, (_, zone) => ({ zone_index: zone, effect: {} }));
+        return { ...(existing || { device_id: device.device_id }), zones: zones.map((zone) => ({ ...zone, effect: { ...zone.effect, mode: 'Off' } })) };
+      });
+      const others = known.filter((item) => !dark.some((device) => device.device_id === item.device_id));
+      await send({ ...rgb, devices: [...others, ...dark] });
+    } else if (!off && store.data.lightsSnapshot) {
+      await send(store.data.lightsSnapshot);
+      store.data.lightsSnapshot = null;
+      store.save();
+    }
+  }
+
   status() {
     const alert = this.alert();
     const schedule = this.activeSchedule();
     return {
       alert,
       schedule: schedule ? schedule.name : null,
+      lightsOff: Boolean(this.store.data.lightsSnapshot),
       muted: this.store.data.alerts.muteUntil > this.now().getTime(),
       error: this.lastError,
     };
   }
 }
 
-module.exports = { Engine, Store, scheduleActive, mediaType, ALERT_TEMPLATES };
+module.exports = { Engine, Store, scheduleActive, mediaType, findEntry, ALERT_TEMPLATES };

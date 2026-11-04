@@ -21,6 +21,7 @@ const EMPTY_VALUES = {
   disks_bad: 0,
   storage_used_pct: 0,
   storage_free_tb: 0,
+  volume_max_used_pct: 0,
   array_used_pct: 0,
   array_free_tb: 0,
   cache_used_pct: 0,
@@ -63,6 +64,11 @@ const usedPct = ({ size, free }) => (size > 0 ? ((size - free) / size) * 100 : 0
 // Names become file names in sensor commands, which the daemon runs as shell.
 const volumeKey = (name) => String(name).toLowerCase().replace(/[^a-z0-9_-]/g, '_');
 
+const hottest = (list) => {
+  const temps = list.map((disk) => Number(disk.temp)).filter((temp) => Number.isFinite(temp) && temp > 0);
+  return temps.length ? Math.max(...temps) : 0;
+};
+
 // Members of a pool are named after it (tank, tank2, tank3). They describe one
 // filesystem, so a pool counts once, using the member that reports its size.
 function poolsOf(disks) {
@@ -70,7 +76,8 @@ function poolsOf(disks) {
   for (const disk of disks) {
     if (disk.type !== 'Cache') continue;
     const name = (disk.name || disk.id).replace(/~.*$/, '').replace(/\d+$/, '');
-    const pool = pools.get(name) || { name, size: 0, free: 0 };
+    const pool = pools.get(name) || { name, size: 0, free: 0, members: [] };
+    pool.members.push(disk);
     if (number(disk.fsSize) > pool.size) {
       pool.size = number(disk.fsSize);
       pool.free = number(disk.fsFree);
@@ -96,7 +103,8 @@ function computeStats(disksText, varText) {
   const data = total(disks.filter((disk) => disk.type === 'Data' && number(disk.fsSize) > 0));
   const pools = poolsOf(disks);
   const cache = total(pools);
-  const volumes = data.size > 0 ? [{ name: 'Array', ...data }, ...pools] : pools;
+  const arrayMembers = disks.filter((disk) => disk.type === 'Data' || disk.type === 'Parity');
+  const volumes = data.size > 0 ? [{ name: 'Array', ...data, members: arrayMembers }, ...pools] : pools;
   const storage = total(volumes);
   const syncSize = number(vars.mdResyncSize) || number(vars.mdResync);
   const syncPos = number(vars.mdResyncPos);
@@ -111,6 +119,7 @@ function computeStats(disksText, varText) {
       disks_bad: bad.length,
       storage_used_pct: round(usedPct(storage)),
       storage_free_tb: round(storage.free / KB_PER_TB),
+      volume_max_used_pct: round(Math.max(0, ...volumes.map(usedPct))),
       array_used_pct: round(usedPct(data)),
       array_free_tb: round(data.free / KB_PER_TB),
       cache_used_pct: round(usedPct(cache)),
@@ -120,6 +129,7 @@ function computeStats(disksText, varText) {
       ...Object.fromEntries(volumes.flatMap((volume) => [
         [`volume_${volumeKey(volume.name)}_used_pct`, round(usedPct(volume))],
         [`volume_${volumeKey(volume.name)}_free_tb`, round(volume.free / KB_PER_TB)],
+        [`volume_${volumeKey(volume.name)}_temp_max`, hottest(volume.members)],
       ])),
     },
     hasTemps: temps.length > 0,

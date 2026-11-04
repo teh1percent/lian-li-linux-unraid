@@ -10,16 +10,33 @@ const http = require('http');
 const path = require('path');
 
 const { DaemonClient } = require('./lib/daemon');
-const { Engine, Store, mediaType, ALERT_TEMPLATES } = require('./lib/engine');
+const { Engine, Store, mediaType, findEntry, ALERT_TEMPLATES } = require('./lib/engine');
+const { History } = require('./lib/history');
 const { buildTemplates } = require('./lib/templates');
+const { COLOR_KEYS, PRESETS, DEFAULT_LIMITS, isColor, validColors, pickColors, validLimits, themeExists, themeColors } = require('./lib/themes');
 const { readStats, selectStorage, writeStats } = require('./lib/unraid');
 
 const STATS_INTERVAL_MS = 5000;
 const ENGINE_INTERVAL_MS = 15000;
+const HISTORY_INTERVAL_MS = 60000;
+const HISTORY_SAVE_EVERY = 10;
 const MAX_BODY = 64 * 1024;
+const MAX_UPLOAD = 512 * 1024 * 1024;
 const MIN_FAN_PERCENT = 20;
 const MAX_MUTE_HOURS = 168;
+const MAX_CURVES = 32;
+const MAX_CURVE_POINTS = 8;
+const BIND_TIMEOUT_MS = 20000;
+const PIXEL_MINUTES = [15, 30, 60, 120];
+const PIXEL_PREPARE_MS = 30000;
 const HIDDEN_RGB_MODES = new Set(['Direct', 'Render', 'Paint', 'Voice']);
+const DIRECTIONS = new Set(['Clockwise', 'CounterClockwise', 'Up', 'Down', 'Spread', 'Gather']);
+const RESERVED_CURVE = /^(off$|__mb_sync__)/;
+const STATIC_FILES = {
+  '/': ['index.html', 'text/html; charset=utf-8'],
+  '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  '/style.css': ['style.css', 'text/css; charset=utf-8'],
+};
 
 class BadRequest extends Error {}
 
@@ -50,14 +67,17 @@ function listMedia(dir) {
   return found.sort();
 }
 
-function createApp({ daemon, engine, store, options }) {
-  const page = path.join(__dirname, 'public', 'index.html');
+function createApp({ daemon, engine, store, options, history }) {
+  const publicDir = path.join(__dirname, 'public');
   const alertIds = new Set(Object.values(ALERT_TEMPLATES));
-  const screenTemplates = () => buildTemplates(options.statsDir, engine.getStats().volumes)
-    .filter((item) => !alertIds.has(item.id));
+  const selectable = (colors = PRESETS.default, limits = store.data.limits) => (
+    buildTemplates(options.statsDir, engine.getStats().volumes, colors, limits).filter((item) => !alertIds.has(item.id))
+  );
   const passwordHash = options.password
     ? crypto.createHash('sha256').update(options.password).digest()
     : null;
+  const uploadDir = () => options.uploadDir.split(path.sep).join('/');
+  const allMedia = () => [...listMedia(options.mediaDir), ...listMedia(options.uploadDir)];
 
   const findDevice = async (deviceId) => {
     const devices = await daemon.request('ListDevices');
@@ -67,31 +87,67 @@ function createApp({ daemon, engine, store, options }) {
   };
 
   const knownTemplate = async (id) => {
-    if (screenTemplates().some((item) => item.id === id)) return true;
+    if (selectable().some((item) => item.id === id)) return true;
     const stored = await daemon.request('GetLcdTemplates');
     return stored.some((item) => item.id === id && !alertIds.has(id));
   };
 
+  // Sensors a fan curve may follow. Commands only ever read our own stat files.
+  async function curveSensors() {
+    const stat = (key, name) => {
+      const cmd = `cat ${options.statsDir}/${key}`;
+      return { id: `unraid:${key}`, name, source: { type: 'command', cmd }, command: cmd };
+    };
+    const unraid = [stat('disk_temp_max', 'Hottest drive'), stat('disk_temp_avg', 'Average drive temperature')];
+    for (const volume of engine.getStats().volumes) unraid.push(stat(`volume_${volume.key}_temp_max`, `Hottest drive in ${volume.name}`));
+    const listed = await daemon.request('ListSensors').catch(() => []);
+    const hardware = listed
+      .filter((sensor) => sensor.unit === 'C' && sensor.source?.type !== 'command')
+      .map((sensor) => ({
+        id: JSON.stringify(sensor.source),
+        name: sensor.display_name || `${sensor.sensor_name?.device_name || 'Sensor'}: ${sensor.sensor_name?.sensor_name || ''}`,
+        source: sensor.source,
+        command: '',
+      }));
+    return [...unraid, ...hardware];
+  }
+
+  function curveSensorId(curve, sensors) {
+    const source = curve.temp_source;
+    if (source?.type === 'command' || (!source && curve.temp_command)) {
+      return sensors.find((sensor) => sensor.command && sensor.command === curve.temp_command)?.id || 'custom';
+    }
+    return source ? JSON.stringify(source) : 'custom';
+  }
+
   async function state() {
     const stats = selectStorage(engine.getStats(), store.data.storageVolume);
+    const shown = store.data;
     const base = {
       time: engine.now().toISOString(),
       localTime: engine.now().toLocaleString(),
       timezone: process.env.TZ || 'UTC',
       fullAppPort: options.fullAppPort,
       stats,
-      settings: { schedules: store.data.schedules, alerts: store.data.alerts, screens: store.data.screens },
+      settings: {
+        schedules: shown.schedules, alerts: shown.alerts, screens: shown.screens, theme: shown.theme,
+        customColors: shown.customColors, lcdThemes: shown.lcdThemes, limits: shown.limits, names: shown.names,
+      },
       status: engine.status(),
-      media: listMedia(options.mediaDir),
-      templates: screenTemplates().map(({ id, name }) => ({ id, name })),
+      media: allMedia(),
+      uploadDir: uploadDir(),
+      templates: selectable().map(({ id, name }) => ({ id, name })),
+      themes: { keys: COLOR_KEYS, presets: PRESETS, defaultLimits: DEFAULT_LIMITS },
     };
     try {
-      const [info, devices, config, telemetry, capabilities] = await Promise.all([
+      const [info, devices, config, telemetry, capabilities, sensors, profiles] = await Promise.all([
         daemon.request('GetDaemonInfo'),
         daemon.request('ListDevices'),
         daemon.request('GetConfig'),
         daemon.request('GetTelemetry'),
         daemon.request('GetRgbCapabilities').catch(() => []),
+        curveSensors(),
+        daemon.request('ListDeviceProfiles').catch(() => []),
       ]);
       const fans = config.fans?.speeds || [];
       const rgbDevices = config.rgb?.devices || [];
@@ -99,26 +155,46 @@ function createApp({ daemon, engine, store, options }) {
         ...base,
         daemon: { connected: true, version: info.version, mode: info.mode },
         curves: (config.fan_curves || []).map((curve) => curve.name),
+        curveDetails: (config.fan_curves || []).map((curve) => ({ name: curve.name, points: curve.curve, sensor: curveSensorId(curve, sensors) })),
+        sensors: sensors.map(({ id, name }) => ({ id, name })),
+        profiles: profiles.map((profile) => ({ name: profile.name, deviceId: profile.device_id })),
+        pixelClean: Object.values(telemetry.pixel_clean_statuses || {}).filter((item) => item.active),
+        daemonSettings: {
+          turnOffLcds: config.turn_off_lcds_on_shutdown !== false,
+          hardwareVideo: config.hardware_video === true,
+          rgbDrift: config.rgb_drift_detection_enabled !== false,
+          defaultFps: config.default_fps ?? null,
+        },
         devices: devices.map((device) => {
           const caps = capabilities.find((item) => item.device_id === device.device_id);
           const zone = rgbDevices.find((item) => item.device_id === device.device_id)?.zones?.[0];
+          const entry = findEntry(config, device.device_id);
           return {
             id: device.device_id,
-            name: device.name,
+            name: store.data.names[device.device_id] || device.name,
+            model: device.name,
+            serial: device.serial,
             hasFan: device.has_fan,
             hasRgb: device.has_rgb,
             hasLcd: device.has_lcd,
             unbound: device.is_unbound_wireless,
+            bindStatus: device.wireless_bind_status || null,
+            foreignOnline: device.foreign_master_online === true,
+            firmware: device.firmware_version || null,
             fanCount: device.fan_count,
             rpms: telemetry.fan_rpms?.[device.device_id] || [],
             speed: fans.find((group) => group.device_id === device.device_id)?.speeds?.[0] ?? null,
             effect: zone?.effect || null,
             rgbModes: (caps?.supported_modes || []).filter((mode) => !HIDDEN_RGB_MODES.has(mode)),
+            rgbParams: caps?.sync_effect_parameters || [],
+            brightness: entry?.brightness ?? 100,
+            orientation: entry?.orientation ?? 0,
+            hasEntry: Boolean(entry),
           };
         }),
       };
     } catch (error) {
-      return { ...base, daemon: { connected: false, error: error.message }, curves: [], devices: [] };
+      return { ...base, daemon: { connected: false, error: error.message }, curves: [], curveDetails: [], sensors: [], profiles: [], pixelClean: [], daemonSettings: null, devices: [] };
     }
   }
 
@@ -142,14 +218,58 @@ function createApp({ daemon, engine, store, options }) {
     await daemon.write('SetFanConfig', { config: { ...fans, speeds: [...others, { device_id: device.device_id, speeds }] } });
   }
 
+  async function saveCurve(body) {
+    check(typeof body.name === 'string' && body.name.trim() && body.name.length <= 40, 'A curve needs a short name');
+    const name = body.name.trim();
+    check(!RESERVED_CURVE.test(name), 'That name is reserved');
+    const points = body.points;
+    check(Array.isArray(points) && points.length >= 2 && points.length <= MAX_CURVE_POINTS, `A curve needs 2 to ${MAX_CURVE_POINTS} points`);
+    points.forEach((point, index) => {
+      check(Array.isArray(point) && point.length === 2 && isInt(point[0], 0, 110), 'Temperatures must be 0 to 110 °C');
+      check(isInt(point[1], MIN_FAN_PERCENT, 100), `Speeds must be ${MIN_FAN_PERCENT} to 100%`);
+      if (index) check(point[0] > points[index - 1][0], 'Temperatures must go up from point to point');
+    });
+    const sensor = (await curveSensors()).find((item) => item.id === body.sensor);
+    check(sensor, 'Unknown sensor');
+
+    const config = await daemon.request('GetConfig');
+    const curves = config.fan_curves || [];
+    const original = typeof body.original === 'string' ? body.original : name;
+    const index = curves.findIndex((curve) => curve.name === original);
+    check(name === original || !curves.some((curve) => curve.name === name), 'A curve with that name already exists');
+    check(index !== -1 || curves.length < MAX_CURVES, 'Too many curves');
+    const curve = { name, temp_source: sensor.source, temp_command: sensor.command, curve: points };
+    if (index === -1) curves.push(curve);
+    else curves[index] = curve;
+    if (name !== original && config.fans?.speeds) {
+      for (const group of config.fans.speeds) {
+        group.speeds = group.speeds.map((speed) => (speed === original ? name : speed));
+      }
+    }
+    await daemon.write('SetConfig', { config: { ...config, fan_curves: curves } });
+  }
+
+  async function deleteCurve(body) {
+    const config = await daemon.request('GetConfig');
+    const curves = config.fan_curves || [];
+    check(curves.some((curve) => curve.name === body.name), 'Unknown fan curve');
+    const used = (config.fans?.speeds || []).some((group) => group.speeds.includes(body.name));
+    check(!used, 'A fan group is using this curve. Switch it to something else first.');
+    await daemon.write('SetConfig', { config: { ...config, fan_curves: curves.filter((curve) => curve.name !== body.name) } });
+  }
+
   async function setRgb(body) {
     const device = await findDevice(body.device_id);
     check(device.has_rgb && !device.is_unbound_wireless, 'This device has no controllable lighting');
+    check(!store.data.lightsSnapshot, 'A schedule has the lights off right now. Change it on the Automation page first.');
     const capabilities = await daemon.request('GetRgbCapabilities');
     const caps = capabilities.find((item) => item.device_id === device.device_id);
     check(caps?.supported_modes?.includes(body.mode) && !HIDDEN_RGB_MODES.has(body.mode), 'Unsupported effect');
-    check(Array.isArray(body.color) && body.color.length === 3 && body.color.every((part) => isInt(part, 0, 255)), 'Invalid colour');
+    const colors = body.colors || [body.color];
+    check(Array.isArray(colors) && colors.length >= 1 && colors.length <= 4 && colors.every(isColor), 'Invalid colour');
     check(isInt(body.brightness, 0, 4), 'Brightness must be 0 to 4');
+    if (body.speed !== undefined) check(isInt(body.speed, 0, 4), 'Speed must be 0 to 4');
+    if (body.direction !== undefined) check(DIRECTIONS.has(body.direction), 'Unknown direction');
 
     const config = await daemon.request('GetConfig');
     const rgb = config.rgb || { enabled: true, devices: [] };
@@ -159,15 +279,53 @@ function createApp({ daemon, engine, store, options }) {
       entry = { device_id: device.device_id, zones: [] };
       devices.push(entry);
     }
+    const options_ = { mode: body.mode, colors, brightness: body.brightness, disabled: false };
+    if (body.speed !== undefined) options_.speed = body.speed;
+    if (body.direction !== undefined) options_.direction = body.direction;
     const zoneCount = Math.max(device.rgb_zone_count || 1, 1);
     for (let zone = 0; zone < zoneCount; zone += 1) {
       const existing = entry.zones.find((item) => item.zone_index === zone);
-      const effect = { ...(existing?.effect || {}), mode: body.mode, colors: [body.color], brightness: body.brightness, disabled: false };
+      const effect = { ...(existing?.effect || {}), ...options_ };
       if (existing) existing.effect = effect;
       else entry.zones.push({ zone_index: zone, effect });
       await daemon.write('SetRgbEffect', { device_id: device.device_id, zone, effect });
     }
     await daemon.write('SetRgbConfig', { config: { ...rgb, devices } });
+  }
+
+  async function setProfile(body) {
+    check(typeof body.name === 'string' && /^[\w .-]{1,40}$/.test(body.name) && !/^\.+$/.test(body.name), 'Profile names can use letters, numbers, spaces, dots and dashes');
+    if (body.action === 'delete') return daemon.write('DeleteDeviceProfile', { name: body.name });
+    const device = await findDevice(body.device_id);
+    check(body.action === 'save' || body.action === 'apply', 'Unknown action');
+    const method = body.action === 'save' ? 'SaveDeviceProfile' : 'ApplyDeviceProfile';
+    return daemon.write(method, { name: body.name, device_id: device.device_id });
+  }
+
+  async function setDevice(body) {
+    const device = await findDevice(body.device_id);
+    if (body.action === 'identify') return daemon.write('PingDevice', { device_id: device.device_id, zone: 0 });
+    if (body.action === 'rename') {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      check(name.length <= 40, 'Names can be up to 40 characters');
+      if (name) store.data.names[device.device_id] = name;
+      else delete store.data.names[device.device_id];
+      return store.save();
+    }
+    check(body.action === 'bind' || body.action === 'unbind', 'Unknown action');
+    check(device.device_id.startsWith('wireless:'), 'Only wireless devices can be paired');
+    check(!device.foreign_master_online, 'Another controller owns this device and is switched on. Turn that controller off first.');
+    const mac = device.device_id.slice('wireless:'.length);
+    const queued = await daemon.write(body.action === 'bind' ? 'BindWirelessDevice' : 'UnbindWirelessDevice', { mac });
+    if (!queued?.operation_id) return null;
+    const deadline = Date.now() + BIND_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const result = await daemon.request('GetWirelessOperation', { operation_id: queued.operation_id });
+      if (result.status === 'succeeded') return null;
+      if (result.status === 'failed') throw new Error(result.message || 'Pairing failed');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error('Pairing is taking too long. Check the device list in a moment.');
   }
 
   async function setScreen(body) {
@@ -176,17 +334,108 @@ function createApp({ daemon, engine, store, options }) {
     const screen = body.screen || {};
     if (screen.kind === 'keep') {
       delete store.data.screens[device.device_id];
+    } else if (screen.kind === 'template') {
+      check(await knownTemplate(screen.templateId), 'Unknown screen');
+      store.data.screens[device.device_id] = { kind: 'template', templateId: screen.templateId };
+    } else if (screen.kind === 'color') {
+      check(isColor(screen.rgb), 'Invalid colour');
+      store.data.screens[device.device_id] = { kind: 'color', rgb: screen.rgb };
     } else {
-      if (screen.kind === 'template') {
-        check(await knownTemplate(screen.templateId), 'Unknown screen');
-        store.data.screens[device.device_id] = { kind: 'template', templateId: screen.templateId };
-      } else {
-        check(screen.kind === 'media' && listMedia(options.mediaDir).includes(screen.path), 'Unknown media file');
-        store.data.screens[device.device_id] = { kind: 'media', path: screen.path };
-      }
+      check(screen.kind === 'media' && allMedia().includes(screen.path), 'Unknown media file');
+      store.data.screens[device.device_id] = { kind: 'media', path: screen.path };
     }
     store.save();
     await engine.tick();
+  }
+
+  async function setLcd(body) {
+    const device = await findDevice(body.device_id);
+    check(device.has_lcd, 'This device has no screen');
+    if (body.theme !== undefined) {
+      check(body.theme === null || themeExists(store.data, body.theme), 'Unknown theme');
+      if (body.theme === null) delete store.data.lcdThemes[device.device_id];
+      else store.data.lcdThemes[device.device_id] = body.theme;
+      store.save();
+      await engine.tick();
+    }
+    if (body.brightness === undefined && body.orientation === undefined) return;
+    const config = await daemon.request('GetConfig');
+    const entry = findEntry(config, device.device_id);
+    if (body.brightness !== undefined) {
+      check(isInt(body.brightness, 0, 100), 'Brightness must be 0 to 100');
+      if (device.device_id in store.data.baseBrightness) {
+        store.data.baseBrightness[device.device_id] = body.brightness;
+        store.save();
+      } else {
+        await daemon.write('SetLcdBrightness', { device_id: device.device_id, brightness: body.brightness });
+      }
+    }
+    if (body.orientation !== undefined) {
+      check([0, 90, 180, 270].includes(body.orientation), 'Rotation must be 0, 90, 180 or 270');
+      check(entry, 'Choose what this screen shows first');
+    }
+    if (entry) {
+      const next = { ...entry };
+      if (body.brightness !== undefined) next.brightness = body.brightness;
+      if (body.orientation !== undefined) next.orientation = body.orientation;
+      await daemon.write('SetLcdMedia', { device_id: `serial:${entry.serial}`, config: next });
+    }
+  }
+
+  async function setTheme(body) {
+    if (body.customColors !== undefined) {
+      check(validColors(body.customColors), 'Invalid colours');
+      store.data.customColors = pickColors(body.customColors);
+    }
+    if (body.theme !== undefined) {
+      check(themeExists(store.data, body.theme), 'Unknown theme');
+      store.data.theme = body.theme;
+    }
+    if (body.limits !== undefined) {
+      check(validLimits(body.limits), 'The warning limit must be below the danger limit');
+      store.data.limits = Object.fromEntries(Object.keys(DEFAULT_LIMITS).map((key) => [key, body.limits[key]]));
+    }
+    store.save();
+    await engine.tick();
+  }
+
+  async function setPixel(body) {
+    if (body.action === 'stop') return daemon.write('StopPixelClean', { device_id: null, session_id: null });
+    check(body.action === 'start' && PIXEL_MINUTES.includes(body.minutes), 'Choose 15, 30, 60 or 120 minutes');
+    // The daemon may prepare the screens first; it starts only once told they're ready.
+    const start = (preparation) => daemon.write('StartPixelClean', { device_id: null, duration_minutes: body.minutes, preparation_id: preparation });
+    const first = await start(null);
+    if (first.started) return null;
+    const deadline = Date.now() + PIXEL_PREPARE_MS;
+    let started = false;
+    try {
+      while (Date.now() < deadline) {
+        const status = await daemon.request('GetPixelCleanPreparation', { session_id: first.session_id });
+        if (status.error) throw new Error(status.error);
+        if (status.ready) {
+          started = (await start(first.session_id)).started === true;
+          if (!started) throw new Error('The daemon did not confirm the start');
+          return null;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      throw new Error('The screens took too long to get ready');
+    } finally {
+      if (!started) await daemon.write('StopPixelClean', { device_id: null, session_id: first.session_id }).catch(() => {});
+    }
+  }
+
+  async function setDaemonSettings(body) {
+    const config = await daemon.request('GetConfig');
+    const next = { ...config };
+    if (body.turnOffLcds !== undefined) next.turn_off_lcds_on_shutdown = body.turnOffLcds === true;
+    if (body.hardwareVideo !== undefined) next.hardware_video = body.hardwareVideo === true;
+    if (body.rgbDrift !== undefined) next.rgb_drift_detection_enabled = body.rgbDrift === true;
+    if (body.defaultFps !== undefined) {
+      check(isInt(body.defaultFps, 1, 60), 'Frame rate must be 1 to 60');
+      next.default_fps = body.defaultFps;
+    }
+    await daemon.write('SetConfig', { config: next });
   }
 
   async function setStorage(body) {
@@ -207,7 +456,7 @@ function createApp({ daemon, engine, store, options }) {
       if (templateId) check(await knownTemplate(templateId), 'Unknown screen');
       clean.push({
         name: item.name.trim(), start: item.start, end: item.end, days: [...new Set(item.days)],
-        brightness: item.brightness, templateId, enabled: item.enabled === true,
+        brightness: item.brightness, templateId, lightsOff: item.lightsOff === true, enabled: item.enabled === true,
       });
     }
     store.data.schedules = clean;
@@ -217,11 +466,15 @@ function createApp({ daemon, engine, store, options }) {
 
   async function setAlerts(body) {
     check(isInt(body.diskTempC, 30, 70), 'Temperature must be 30 to 70 °C');
+    const storagePct = body.storagePct ?? store.data.alerts.storagePct;
+    check(isInt(storagePct, 50, 100), 'Storage limit must be 50 to 100%');
     Object.assign(store.data.alerts, {
       enabled: body.enabled === true,
       diskTempC: body.diskTempC,
       diskProblem: body.diskProblem === true,
       parityErrors: body.parityErrors === true,
+      storageFull: body.storageFull === true,
+      storagePct,
     });
     store.save();
     await engine.tick();
@@ -234,14 +487,88 @@ function createApp({ daemon, engine, store, options }) {
     await engine.tick();
   }
 
+  async function deleteMedia(body) {
+    const file = String(body.path || '');
+    check(listMedia(options.uploadDir).includes(file), 'Only uploaded files can be deleted here');
+    const inUse = Object.values(store.data.screens).some((screen) => screen.path === file);
+    check(!inUse, 'A screen is using this file. Choose something else for it first.');
+    fs.unlinkSync(file);
+  }
+
+  // Streams to a temporary file so a large video never sits in memory.
+  function upload(req, url) {
+    const name = path.basename(String(url.searchParams.get('name') || '')).replace(/[^\w.-]/g, '_').replace(/^\.+/, '');
+    check(name && mediaType(name), 'Use an image, GIF or video file');
+    check(Number(req.headers['content-length'] || 0) <= MAX_UPLOAD, 'Files can be up to 512 MB');
+    fs.mkdirSync(options.uploadDir, { recursive: true });
+    const target = path.join(options.uploadDir, name);
+    const temporary = `${target}.${crypto.randomBytes(4).toString('hex')}.part`;
+    return new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(temporary, { flags: 'wx' });
+      let size = 0;
+      const fail = (error) => {
+        out.destroy();
+        fs.rm(temporary, { force: true }, () => reject(error));
+      };
+      req.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > MAX_UPLOAD) {
+          req.destroy();
+          fail(new BadRequest('Files can be up to 512 MB'));
+        }
+      });
+      req.on('error', fail);
+      out.on('error', fail);
+      out.on('finish', () => {
+        fs.rename(temporary, target, (error) => (error ? fail(error) : resolve({ path: target.split(path.sep).join('/') })));
+      });
+      req.pipe(out);
+    });
+  }
+
+  async function preview(url) {
+    const id = url.searchParams.get('id');
+    const stored = await daemon.request('GetLcdTemplates');
+    let template = stored.find((item) => item.id === id);
+    const raw = url.searchParams.get('colors');
+    const named = url.searchParams.get('theme');
+    let colors = null;
+    if (raw) {
+      try {
+        colors = JSON.parse(raw);
+      } catch {
+        throw new BadRequest('Invalid colours');
+      }
+      check(validColors(colors), 'Invalid colours');
+    } else if (named) {
+      check(themeExists(store.data, named), 'Unknown theme');
+      colors = themeColors(store.data, named);
+    }
+    if (colors) template = selectable(colors).find((item) => item.id === id) || template;
+    return template ? daemon.request('RenderTemplatePreview', { template, width: 400, height: 400 }) : null;
+  }
+
+  // These read the whole config and write it back, so they must not overlap each
+  // other or the engine. Handlers that wait for engine.tick() can't go through here.
+  const queued = (handler) => (body) => engine.enqueue(() => handler(body));
+
   const routes = {
-    '/api/fan': setFan,
-    '/api/rgb': setRgb,
+    '/api/fan': queued(setFan),
+    '/api/curve': queued(saveCurve),
+    '/api/curve/delete': queued(deleteCurve),
+    '/api/rgb': queued(setRgb),
+    '/api/profile': setProfile,
+    '/api/device': setDevice,
     '/api/screen': setScreen,
+    '/api/lcd': setLcd,
+    '/api/theme': setTheme,
+    '/api/pixel': setPixel,
+    '/api/settings': queued(setDaemonSettings),
     '/api/storage': setStorage,
     '/api/schedules': setSchedules,
     '/api/alerts': setAlerts,
     '/api/alerts/mute': muteAlerts,
+    '/api/media/delete': deleteMedia,
   };
 
   function send(res, status, type, body, headers = {}) {
@@ -299,26 +626,34 @@ function createApp({ daemon, engine, store, options }) {
         return send(res, 401, 'text/plain', 'Password required', { 'WWW-Authenticate': 'Basic realm="Lian Li"' });
       }
       const url = new URL(req.url, 'http://localhost');
-      if (req.method === 'GET' && url.pathname === '/') {
-        return send(res, 200, 'text/html; charset=utf-8', fs.readFileSync(page));
+      if (req.method === 'GET' && STATIC_FILES[url.pathname]) {
+        const [file, type] = STATIC_FILES[url.pathname];
+        return send(res, 200, type, fs.readFileSync(path.join(publicDir, file)));
       }
       if (req.method === 'GET' && url.pathname === '/api/state') {
         return sendJson(res, 200, await state());
       }
-      if (req.method === 'GET' && url.pathname === '/api/preview') {
-        const id = url.searchParams.get('id');
-        const stored = await daemon.request('GetLcdTemplates');
-        const template = stored.find((item) => item.id === id);
-        if (!template) return sendJson(res, 404, { error: 'Unknown screen' });
-        const preview = await daemon.request('RenderTemplatePreview', { template, width: 400, height: 400 });
-        return send(res, 200, 'image/jpeg', Buffer.from(preview.jpeg_base64, 'base64'));
+      if (req.method === 'GET' && url.pathname === '/api/history') {
+        return sendJson(res, 200, history ? history.points : []);
       }
-      const route = routes[url.pathname];
-      if (req.method === 'POST' && route) {
+      if (req.method === 'GET' && url.pathname === '/api/health') {
+        return sendJson(res, 200, await daemon.request('GetInstallationHealth'));
+      }
+      if (req.method === 'GET' && url.pathname === '/api/export') {
+        const backup = { exportedAt: engine.now().toISOString(), daemonConfig: await daemon.request('GetConfig'), dashboard: store.data };
+        return send(res, 200, 'application/json', JSON.stringify(backup, null, 2), { 'Content-Disposition': 'attachment; filename="lian-li-backup.json"' });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/preview') {
+        const rendered = await preview(url);
+        if (!rendered) return sendJson(res, 404, { error: 'Unknown screen' });
+        return send(res, 200, 'image/jpeg', Buffer.from(rendered.jpeg_base64, 'base64'));
+      }
+      if (req.method === 'POST' && (routes[url.pathname] || url.pathname === '/api/upload')) {
         // A custom header cannot be sent cross-site without a CORS approval,
         // which this server never gives, so other web pages cannot post here.
         if (req.headers['x-lianli-dashboard'] !== '1') return sendJson(res, 403, { error: 'Forbidden' });
-        await route(await readBody(req));
+        if (url.pathname === '/api/upload') return sendJson(res, 200, await upload(req, url));
+        await routes[url.pathname](await readBody(req));
         return sendJson(res, 200, { ok: true });
       }
       return sendJson(res, 404, { error: 'Not found' });
@@ -337,7 +672,9 @@ function main() {
     emhttpDir: env.EMHTTP_DIR || '/host/emhttp',
     statsDir: env.STATS_DIR || '/run/lianli-stats',
     settingsFile: env.EXTRAS_FILE || '/var/lib/lianli/extras/settings.json',
+    historyFile: env.HISTORY_FILE || '/var/lib/lianli/extras/history.json',
     mediaDir: env.MEDIA_DIR || '/media/lianli',
+    uploadDir: env.UPLOAD_DIR || '/var/lib/lianli/extras/media',
     port: Number(env.WEB_PORT) || 6090,
     fullAppPort: Number(env.FULL_APP_PORT) || 6080,
     password: env.WEB_PASSWORD || '',
@@ -361,7 +698,28 @@ function main() {
   engine.tick();
   setInterval(() => engine.tick(), ENGINE_INTERVAL_MS);
 
-  createApp({ daemon, engine, store, options }).listen(options.port, () => {
+  const history = new History(options.historyFile);
+  let samples = 0;
+  setInterval(async () => {
+    const telemetry = await daemon.request('GetTelemetry').catch(() => null);
+    const rpms = Object.values(telemetry?.fan_rpms || {}).flat().filter((rpm) => rpm > 0);
+    history.add({
+      t: Date.now(),
+      temp: stats.hasTemps ? stats.values.disk_temp_max : null,
+      used: stats.available ? stats.values.storage_used_pct : null,
+      rpm: rpms.length ? Math.round(rpms.reduce((sum, rpm) => sum + rpm, 0) / rpms.length) : 0,
+    });
+    samples += 1;
+    if (samples % HISTORY_SAVE_EVERY === 0) {
+      try {
+        history.save();
+      } catch (error) {
+        console.error(`extras: cannot save history: ${error.message}`);
+      }
+    }
+  }, HISTORY_INTERVAL_MS);
+
+  createApp({ daemon, engine, store, options, history }).listen(options.port, () => {
     console.log(`lianli-extras: dashboard listening on port ${options.port}`);
   });
 }
