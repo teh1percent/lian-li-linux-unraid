@@ -1,5 +1,20 @@
 'use strict';
 
+const ICONS = {
+  overview: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  fans: '<circle cx="12" cy="12" r="2"/><path d="M12 10c0-4 1-7 4-7s3 5-2 8M14 12c4 0 7 1 7 4s-5 3-8-2M12 14c0 4-1 7-4 7s-3-5 2-8M10 12c-4 0-7-1-7-4s5-3 8 2"/>',
+  lights: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.8 1 1.5 1 2.5h6c0-1 .2-1.7 1-2.5A6 6 0 0 0 12 3z"/>',
+  screens: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  auto: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  system: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+  temp: '<path d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/>',
+  disk: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h.01M11 15h6"/>',
+  storage: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  free: '<path d="M12 4v16M4 12h16"/>',
+  parity: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+};
+const icon = (name) => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+
 const TABS = [['overview', 'Status'], ['fans', 'Fans'], ['lights', 'Lights'], ['screens', 'Screens'], ['auto', 'Auto'], ['system', 'System']];
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ALERT_TEXT = { disk: 'Disk problem', parity: 'Parity errors', temp: 'Drive too hot', storage: 'Storage nearly full' };
@@ -28,10 +43,12 @@ const hex = (rgb) => '#' + (rgb || [255, 255, 255]).map((part) => part.toString(
 const rgbOf = (value) => [1, 3, 5].map((start) => parseInt(value.slice(start, start + 2), 16));
 const fileName = (file) => file.split('/').pop();
 const option = (value, text, selected) => `<option value="${esc(value)}" ${selected ? 'selected' : ''}>${esc(text)}</option>`;
+const toggle = (attributes, text, checked) => `<label class="switch"><span>${text}</span><input type="checkbox" ${attributes} ${checked ? 'checked' : ''}></label>`;
 
-function toast(message) {
+function toast(message, isError = false) {
   const element = document.getElementById('toast');
   element.textContent = message;
+  element.classList.toggle('error', isError);
   element.classList.add('show');
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => element.classList.remove('show'), 3500);
@@ -56,7 +73,7 @@ async function act(url, body, done = 'Saved') {
     await post(url, body);
     toast(done);
   } catch (error) {
-    toast(error.message);
+    toast(error.message, true);
   }
   await refresh(true);
 }
@@ -66,7 +83,7 @@ async function actOnAll(items, send) {
     for (const item of items) await send(item);
     toast('Saved');
   } catch (error) {
-    toast(error.message);
+    toast(error.message, true);
   }
   refresh(true);
 }
@@ -75,6 +92,25 @@ function tempClass(temp) {
   const { tempWarn, tempDanger } = data.settings.limits;
   if (temp >= tempDanger) return 'bad';
   return temp >= tempWarn ? 'warn' : 'good';
+}
+
+function storageClass(percent) {
+  const { storageWarn, storageDanger } = data.settings.limits;
+  if (percent >= storageDanger) return 'bad';
+  return percent >= storageWarn ? 'warn' : '';
+}
+
+function renderHealth() {
+  const element = document.getElementById('health');
+  const { daemon, status } = data;
+  let tone = '';
+  let text = 'All good';
+  if (!daemon.connected) [tone, text] = ['bad', 'Daemon offline'];
+  else if (status.alert) [tone, text] = ['bad', ALERT_TEXT[status.alert]];
+  else if (status.error) [tone, text] = ['warn', 'Needs attention'];
+  else if (status.muted) [tone, text] = ['warn', 'Alerts muted'];
+  element.className = `health ${tone}`;
+  element.textContent = text;
 }
 
 // Status ------------------------------------------------------------------
@@ -126,7 +162,66 @@ function renderHistory() {
     historyChart('used', 'Storage used', '%'),
     historyChart('rpm', 'Average fan speed', ' RPM'),
   ].join('');
-  return `<div class="card"><h2>Last 24 hours</h2>${charts || '<span class="muted">Collecting data. Charts appear after a couple of minutes.</span>'}</div>`;
+  return `<div class="card"><div class="card-head"><h2>Last 24 hours</h2></div>${charts ? `<div class="charts">${charts}</div>` : '<span class="empty">Collecting data. Charts appear after a couple of minutes.</span>'}</div>`;
+}
+
+function tile(iconName, label, value, tone = '') {
+  return `<div class="tile"><span>${icon(iconName)}${esc(label)}</span><b class="${tone}">${esc(value)}</b></div>`;
+}
+
+function storageCard(stats) {
+  const picker = stats.volumes.length > 1 ? `<label>Show on this page and the LCD screens
+    <select data-storage>
+      ${option('all', 'All storage', stats.selectedVolume === 'all')}
+      ${stats.volumes.map((volume) => option(volume.key, volume.name, stats.selectedVolume === volume.key)).join('')}
+    </select></label><div style="height:6px"></div>` : '';
+  const rows = stats.volumes.map((volume) => {
+    const shown = volume.key === stats.selectedVolume;
+    return `<div class="volume">
+      <div class="volume-top">
+        <span class="volume-name">${esc(volume.name)}${shown ? '<span class="pill accent">On screens</span>' : ''}</span>
+        <span class="muted num">${volume.freeTb} of ${volume.sizeTb} TB free</span>
+      </div>
+      <div class="meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${volume.usedPct}" aria-label="${esc(volume.name)}: ${volume.usedPct}% used"><i class="${storageClass(volume.usedPct)}" style="width:${Math.min(volume.usedPct, 100)}%"></i></div>
+      <div class="muted num" style="margin:-4px 0 8px">${volume.usedPct}% used</div>
+    </div>`;
+  }).join('');
+  return `<div class="card"><div class="card-head"><h2>Storage</h2></div>${picker}${rows}</div>`;
+}
+
+// Pool members are named after their pool, so the long drive list can be grouped.
+function drivesCard(stats) {
+  const groups = new Map();
+  for (const disk of stats.disks) {
+    const group = disk.type === 'Cache' ? disk.name.replace(/~.*$/, '').replace(/\d+$/, '') : 'Array';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(disk);
+  }
+  const body = [...groups].map(([name, disks]) => {
+    const temps = disks.map((disk) => disk.temp).filter((temp) => temp > 0);
+    const summary = temps.length ? `hottest ${Math.max(...temps)}°C` : 'asleep';
+    return `<div class="pool-head"><b>${esc(name)}</b><span class="muted num">${disks.length} ${disks.length === 1 ? 'drive' : 'drives'}, ${summary}</span></div>
+    <div class="drives ${name === 'Array' ? 'named' : ''}">${disks.map((disk) => {
+      const problem = disk.bad || disk.errors;
+      const note = disk.bad ? 'problem' : disk.errors ? `${disk.errors} errors` : '';
+      // The heading already names the pool, and full names don't fit on a phone.
+      const member = disk.name.slice(name.length).replace(/^~/, '');
+      const shown = name === 'Array' ? disk.name : /^\d*$/.test(member) ? `#${member || 1}` : member;
+      return `<div class="drive ${problem ? 'problem' : ''}"><span title="${esc(disk.name)}">${esc(shown)}</span><b class="${note ? 'bad' : disk.temp ? tempClass(disk.temp) : 'muted'}">${note ? esc(note) : disk.temp ? `${disk.temp}°` : 'Zzz'}</b></div>`;
+    }).join('')}</div>`;
+  }).join('');
+  return `<div class="card"><div class="card-head"><h2>Drives</h2></div>${body}</div>`;
+}
+
+function fansCard(devices) {
+  const fans = devices.filter((device) => device.hasFan);
+  const silent = fans.length > 0 && fans.every((device) => !device.unbound && !device.rpms.some((value) => value > 0));
+  return `<div class="card"><div class="card-head"><h2>Fans</h2></div>${fans.length ? fans.map((device) => {
+    const rpm = device.rpms.filter((value) => value > 0);
+    const reading = device.unbound ? 'Not paired' : rpm.length ? `${rpm.join(' / ')} RPM` : '0 RPM';
+    return `<div class="row"><span>${esc(device.name)}</span><span class="pill ${rpm.length ? 'live' : ''}">${reading}</span></div>`;
+  }).join('') : '<span class="empty">No fan groups found.</span>'}
+  ${silent ? '<p class="muted">Every group reports 0 RPM. This is what the fans send over the radio, so check that they have power and are plugged into their controller.</p>' : ''}</div>`;
 }
 
 function renderOverview() {
@@ -142,39 +237,21 @@ function renderOverview() {
   if (status.error) html += `<div class="card notice">Automation problem: ${esc(status.error)}</div>`;
   if (!stats.available) {
     html += `<div class="card notice">Unraid data isn't available. Add the <b>Unraid state</b> path to the container (host <code>/var/local/emhttp</code>).<br><span class="muted">${esc(stats.error)}</span></div>`;
+    html += fansCard(devices);
   } else {
-    const hottest = stats.hasTemps ? `<b class="${tempClass(values.disk_temp_max)}">${values.disk_temp_max}°C</b>` : '<b>Asleep</b>';
-    const sync = values.sync_pct > 0 ? `${values.sync_pct}%` : 'Idle';
     const storageName = stats.volumes.find((volume) => volume.key === stats.selectedVolume)?.name || 'Storage';
-    html += `<div class="grid">
-      <div class="stat">${hottest}<span>Hottest drive</span></div>
-      <div class="stat"><b>${values.disks_active}/${values.disks_total}</b><span>Drives awake</span></div>
-      <div class="stat"><b>${values.storage_used_pct}%</b><span>${esc(storageName)} used</span></div>
-      <div class="stat"><b>${values.storage_free_tb}</b><span>TB free</span></div>
-      ${stats.hasArray ? `<div class="stat"><b class="${values.parity_errors ? 'bad' : ''}">${values.parity_errors}</b><span>Parity errors</span></div>
-      <div class="stat"><b>${sync}</b><span>Parity check</span></div>` : ''}
+    html += `<div class="tiles">
+      ${tile('temp', 'Hottest drive', stats.hasTemps ? `${values.disk_temp_max}°C` : 'Asleep', stats.hasTemps ? tempClass(values.disk_temp_max) : '')}
+      ${tile('disk', 'Drives awake', `${values.disks_active}/${values.disks_total}`)}
+      ${tile('storage', `${storageName} used`, `${values.storage_used_pct}%`)}
+      ${tile('free', 'TB free', values.storage_free_tb)}
+      ${stats.hasArray ? `${tile('parity', 'Parity errors', values.parity_errors, values.parity_errors ? 'bad' : '')}
+      ${tile('parity', 'Parity check', values.sync_pct > 0 ? `${values.sync_pct}%` : 'Idle')}` : ''}
     </div>`;
-    if (stats.volumes.length) {
-      const picker = stats.volumes.length > 1 ? `<label>Show on this page and the LCD screens
-        <select data-storage>
-          ${option('all', 'All storage', stats.selectedVolume === 'all')}
-          ${stats.volumes.map((volume) => option(volume.key, volume.name, stats.selectedVolume === volume.key)).join('')}
-        </select></label>` : '';
-      html += `<div class="card"><h2>Storage</h2>${picker}${stats.volumes.map((volume) => `<div class="row"><span>${esc(volume.name)}</span><span class="num">${volume.usedPct}% used, ${volume.freeTb} of ${volume.sizeTb} TB free</span></div>`).join('')}</div>`;
-    }
+    html += renderHistory();
+    html += `<div class="split"><div>${stats.volumes.length ? storageCard(stats) : ''}${fansCard(devices)}</div><div>${stats.disks.length ? drivesCard(stats) : ''}</div></div>`;
   }
-  html += renderHistory();
-  const fans = devices.filter((device) => device.hasFan);
-  const silent = fans.length > 0 && fans.every((device) => !device.unbound && !device.rpms.some((value) => value > 0));
-  html += `<div class="card"><h2>Fans</h2>${fans.length ? fans.map((device) => {
-    const rpm = device.rpms.filter((value) => value > 0);
-    return `<div class="row"><span>${esc(device.name)}</span><span class="num">${device.unbound ? 'Not paired' : rpm.length ? rpm.join(' / ') + ' RPM' : '0 RPM'}</span></div>`;
-  }).join('') : '<span class="muted">No fan groups found.</span>'}
-  ${silent ? '<p class="muted">Every group reports 0 RPM. This is what the fans send over the radio, so check that they have power and are plugged into their controller.</p>' : ''}</div>`;
-  if (stats.disks.length) {
-    html += `<div class="card"><h2>Drives</h2>${stats.disks.map((disk) => `<div class="row"><span>${esc(disk.name)}${disk.bad ? ' <span class="bad">problem</span>' : ''}${disk.errors ? ` <span class="bad">${disk.errors} errors</span>` : ''}</span><span class="num ${disk.temp ? tempClass(disk.temp) : 'muted'}">${disk.temp ? disk.temp + '°C' : 'Asleep'}</span></div>`).join('')}</div>`;
-  }
-  html += `<p class="muted">Server time ${esc(data.localTime)} (${esc(data.timezone)}). Daemon ${esc(daemon.version || 'offline')}.</p>`;
+  html += `<p class="footnote">Server time ${esc(data.localTime)} (${esc(data.timezone)}). Daemon ${esc(daemon.version || 'offline')}.</p>`;
   view.innerHTML = html;
 }
 
@@ -201,13 +278,15 @@ function curveChart(points) {
 function curveEditor() {
   const draft = curveDraft;
   const sensors = data.sensors.map((sensor) => option(sensor.id, sensor.name, sensor.id === draft.sensor)).join('');
-  return `<div class="card" id="curveEditor"><h2>${draft.original ? `Edit ${esc(draft.original)}` : 'New curve'}</h2>
-    <label>Name<input type="text" maxlength="40" data-curve="name" value="${esc(draft.name)}"></label>
-    <label>Follow this temperature
-      <select data-curve="sensor">
-        ${draft.sensor === 'custom' ? '<option value="custom" selected disabled>Set in the full app (pick one to save)</option>' : ''}
-        ${sensors}
-      </select></label>
+  return `<div class="card" id="curveEditor"><div class="card-head"><h2>${draft.original ? `Edit ${esc(draft.original)}` : 'New curve'}</h2></div>
+    <div class="two">
+      <label style="margin-top:0">Name<input type="text" maxlength="40" data-curve="name" value="${esc(draft.name)}"></label>
+      <label style="margin-top:0">Follow this temperature
+        <select data-curve="sensor">
+          ${draft.sensor === 'custom' ? '<option value="custom" selected disabled>Set in the full app (pick one to save)</option>' : ''}
+          ${sensors}
+        </select></label>
+    </div>
     <div id="curvePreview">${curveChart(draft.points)}</div>
     ${draft.points.map(([temp, pct], index) => `<div class="points">
       <label>Temperature °C<input type="number" min="0" max="110" data-point="${index}" data-part="0" value="${temp}"></label>
@@ -224,7 +303,7 @@ function curveEditor() {
 
 function renderFans() {
   const fans = data.devices.filter((device) => device.hasFan && !device.unbound);
-  let html = fans.length ? fans.map((device) => {
+  let html = fans.length ? `<div class="cards">${fans.map((device) => {
     const isCurve = typeof device.speed === 'string';
     const known = !isCurve || data.curves.includes(device.speed);
     const percent = typeof device.speed === 'number' ? Math.max(MIN_FAN, Math.round(device.speed / 2.55)) : 60;
@@ -233,17 +312,17 @@ function renderFans() {
     if (!known) options.push('<option selected disabled>Set in the full app</option>');
     const rpm = device.rpms.filter((value) => value > 0);
     return `<div class="card" data-device="${esc(device.id)}">
-      <div class="row"><b>${esc(device.name)}</b><span class="num">${rpm.length ? rpm.join(' / ') + ' RPM' : '0 RPM'}</span></div>
-      <label>Mode<select data-fan-mode>${options.join('')}</select></label>
-      ${isCurve ? '' : `<label>Speed: <span data-out>${percent}%</span><input type="range" min="${MIN_FAN}" max="100" step="5" value="${percent}" data-fan-speed></label>`}
+      <div class="card-head"><h2>${esc(device.name)}</h2><span class="pill ${rpm.length ? 'live' : ''}">${rpm.length ? `${rpm.join(' / ')} RPM` : '0 RPM'}</span></div>
+      <label style="margin-top:0">Mode<select data-fan-mode>${options.join('')}</select></label>
+      ${isCurve ? '' : `<label><span class="slider-label"><span>Speed</span><span data-out>${percent}%</span></span><input type="range" min="${MIN_FAN}" max="100" step="5" value="${percent}" data-fan-speed></label>`}
       ${fans.length > 1 ? '<div class="actions"><button class="btn" data-fan-all>Use on all fans</button></div>' : ''}
     </div>`;
-  }).join('') + `<p class="muted">Speeds stop at ${MIN_FAN}% here so fans can't be stopped by accident.</p>`
-    : '<div class="card muted">No paired fan groups found.</div>';
-  html += `<div class="card"><h2>Fan curves</h2>${data.curveDetails.length ? data.curveDetails.map((curve) => `<div class="row">
+  }).join('')}</div><p class="footnote" style="margin-bottom:14px">Speeds stop at ${MIN_FAN}% here so fans can't be stopped by accident.</p>`
+    : '<div class="card empty">No paired fan groups found.</div>';
+  html += `<div class="card"><div class="card-head"><h2>Fan curves</h2></div>${data.curveDetails.length ? data.curveDetails.map((curve) => `<div class="row">
       <span>${esc(curve.name)}<br><span class="muted">${esc(data.sensors.find((sensor) => sensor.id === curve.sensor)?.name || 'Set in the full app')}, ${curve.points.map(([temp, pct]) => `${temp}°→${pct}%`).join(' ')}</span></span>
-      <span class="actions" style="margin:0;flex:none"><button class="btn" data-curve-edit="${esc(curve.name)}">Edit</button><button class="btn danger" data-curve-delete="${esc(curve.name)}">Delete</button></span>
-    </div>`).join('') : '<span class="muted">No curves yet.</span>'}
+      <span class="row-actions"><button class="btn" data-curve-edit="${esc(curve.name)}">Edit</button><button class="btn danger" data-curve-delete="${esc(curve.name)}">Delete</button></span>
+    </div>`).join('') : '<span class="empty">No curves yet.</span>'}
     ${curveDraft ? '' : '<div class="actions"><button class="btn primary" id="curveNew">New curve</button><button class="btn" id="curveDrives">New curve for drive temperature</button></div>'}
   </div>`;
   if (curveDraft) html += curveEditor();
@@ -260,8 +339,8 @@ function renderLights() {
   const lights = data.devices.filter((device) => device.hasRgb && !device.unbound);
   let html = '';
   if (data.status.lightsOff) html += '<div class="card notice">A schedule has the lights off right now. They come back when it ends.</div>';
-  if (lights.length > 1 && !data.status.lightsOff) html += '<div class="actions" style="margin:0 0 12px"><button class="btn" id="lightsOff">Turn all lights off</button></div>';
-  html += lights.length ? lights.map((device) => {
+  if (lights.length > 1 && !data.status.lightsOff) html += '<div class="toolbar"><button class="btn" id="lightsOff">Turn all lights off</button></div>';
+  html += lights.length ? `<div class="cards">${lights.map((device) => {
     const effect = device.effect || { mode: device.rgbModes[0] || 'Off', colors: [[255, 255, 255]], brightness: 4, speed: 2 };
     const modes = device.rgbModes.includes(effect.mode) ? device.rgbModes : [effect.mode, ...device.rgbModes];
     const params = effectParams(device, effect.mode);
@@ -270,8 +349,8 @@ function renderLights() {
     const directions = params?.directions || [];
     const canSpeed = params ? params.supports_speed : !COLOR_FREE.has(effect.mode) && effect.mode !== 'Static';
     return `<div class="card" data-device="${esc(device.id)}">
-      <b>${esc(device.name)}</b>
-      <label>Effect<select data-rgb-mode>${modes.map((mode) => option(mode, spaced(mode), mode === effect.mode)).join('')}</select></label>
+      <div class="card-head"><h2>${esc(device.name)}</h2>${colors.length ? `<span class="dots" aria-hidden="true">${colors.map((color) => `<i style="background:${hex(color)}"></i>`).join('')}</span>` : ''}</div>
+      <label style="margin-top:0">Effect<select data-rgb-mode>${modes.map((mode) => option(mode, spaced(mode), mode === effect.mode)).join('')}</select></label>
       ${colors.length ? `<div class="colors">${colors.map((color, index) => `<label>${colors.length > 1 ? `Colour ${index + 1}` : 'Colour'}<input type="color" data-rgb-color value="${hex(color)}"></label>`).join('')}</div>` : ''}
       <div class="two">
         <label>Brightness<select data-rgb-brightness>${[0, 1, 2, 3, 4].map((level) => option(level, `${(level + 1) * 20}%`, level === (effect.brightness ?? 4))).join('')}</select></label>
@@ -280,11 +359,11 @@ function renderLights() {
       ${directions.length > 1 ? `<label>Direction<select data-rgb-direction>${directions.map((item) => option(item, spaced(item), item === effect.direction)).join('')}</select></label>` : ''}
       <div class="actions"><button class="btn" data-rgb-all>Use on all fans</button></div>
     </div>`;
-  }).join('') : '<div class="card muted">No paired lighting found.</div>';
+  }).join('')}</div>` : '<div class="card empty">No paired lighting found.</div>';
   if (lights.length) {
-    html += `<div class="card"><h2>Saved setups</h2>
+    html += `<div class="card"><div class="card-head"><h2>Saved setups</h2></div>
       ${data.profiles.length ? data.profiles.map((profile) => `<div class="row"><span>${esc(profile.name)}<br><span class="muted">${esc(data.devices.find((device) => device.id === profile.deviceId)?.name || 'Device not connected')}</span></span>
-        <span class="actions" style="margin:0;flex:none"><button class="btn" data-profile-apply="${esc(profile.name)}" data-for="${esc(profile.deviceId)}">Apply</button><button class="btn danger" data-profile-delete="${esc(profile.name)}">Delete</button></span></div>`).join('') : '<span class="muted">Save a fan group\'s lights, fan speed and screen under a name, and bring them back later.</span>'}
+        <span class="row-actions"><button class="btn" data-profile-apply="${esc(profile.name)}" data-for="${esc(profile.deviceId)}">Apply</button><button class="btn danger" data-profile-delete="${esc(profile.name)}">Delete</button></span></div>`).join('') : '<span class="empty">Save a fan group\'s lights, fan speed and screen under a name, and bring them back later.</span>'}
       <div class="two"><label>Group<select id="profileDevice">${lights.map((device) => option(device.id, device.name)).join('')}</select></label>
       <label>Name<input type="text" maxlength="40" id="profileName"></label></div>
       <div class="actions"><button class="btn primary" id="profileSave">Save setup</button></div>
@@ -312,6 +391,11 @@ function themePreview(id) {
   return `/api/preview?id=${encodeURIComponent(id)}&colors=${encodeURIComponent(JSON.stringify(draftColors()))}`;
 }
 
+function swatch(key, label, colors) {
+  return `<button class="swatch" data-theme-pick="${esc(key)}" aria-pressed="${themeDraft.theme === key}">
+    <i style="background:${hex(colors.background)};border-color:${hex(colors.good)}"></i>${esc(label)}</button>`;
+}
+
 function themeCard() {
   const { presets, keys } = data.themes;
   themeDraft ||= {
@@ -321,13 +405,13 @@ function themeCard() {
   };
   const { limits } = themeDraft;
   const limit = (key, text, min, max) => `<label>${text}<input type="number" min="${min}" max="${max}" data-limit="${key}" value="${limits[key]}"></label>`;
-  return `<div class="card" id="themeCard"><h2>Screen colours</h2>
-    <label>Theme<select id="themePick">
-      ${Object.entries(presets).map(([key, preset]) => option(key, preset.label, themeDraft.theme === key)).join('')}
-      ${option('custom', 'Custom', themeDraft.theme === 'custom')}
-    </select></label>
+  return `<div class="card" id="themeCard"><div class="card-head"><h2>Screen colours</h2></div>
+    <div class="swatches" role="group" aria-label="Theme">
+      ${Object.entries(presets).map(([key, preset]) => swatch(key, preset.label, preset)).join('')}
+      ${swatch('custom', 'Custom', themeDraft.customColors)}
+    </div>
     ${themeDraft.theme === 'custom' ? `<div class="colors">${keys.map((key) => `<label>${esc(COLOR_NAMES[key])}<input type="color" data-theme-color="${key}" value="${hex(themeDraft.customColors[key])}"></label>`).join('')}</div>` : ''}
-    <div class="gallery" style="margin-top:12px">
+    <div class="gallery pair">
       <figure><img id="themeA" alt="Drives screen in this theme" src="${esc(themePreview('unraid_drives'))}"><figcaption>Drives</figcaption></figure>
       <figure><img id="themeB" alt="Overview screen in this theme" src="${esc(themePreview('unraid_overview'))}"><figcaption>Overview</figcaption></figure>
     </div>
@@ -340,23 +424,38 @@ function themeCard() {
   </div>`;
 }
 
+function lcdThumb(device) {
+  const screen = data.settings.screens[device.id];
+  if (screen?.kind === 'template') {
+    const own = data.settings.lcdThemes[device.id];
+    const theme = own ? `&theme=${encodeURIComponent(own)}` : '';
+    return `<img class="thumb" alt="" src="/api/preview?id=${encodeURIComponent(screen.templateId)}${theme}">`;
+  }
+  if (screen?.kind === 'color') return `<div class="thumb" style="background:${hex(screen.rgb)}"></div>`;
+  if (screen?.kind === 'media') return '<div class="thumb">Your file</div>';
+  return '<div class="thumb">Full app</div>';
+}
+
 function lcdCard(device) {
   const screen = data.settings.screens[device.id];
   const { presets } = data.themes;
   const own = data.settings.lcdThemes[device.id] || '';
-  return `<div class="card" data-device="${esc(device.id)}"><b>${esc(device.name)}</b>
-    <label>Shows
-      <select data-screen="${esc(device.id)}">
-        <option value="keep">Set in the full app</option>
-        <optgroup label="Unraid">${data.templates.map((item) => option(`template:${item.id}`, item.name)).join('')}</optgroup>
-        ${data.media.length ? `<optgroup label="Your media">${data.media.map((file) => option(`media:${file}`, fileName(file))).join('')}</optgroup>` : ''}
-        <option value="color">Solid colour</option>
-      </select></label>
+  return `<div class="card" data-device="${esc(device.id)}">
+    <div class="lcd-name">${esc(device.name)}</div>
+    <div class="lcd-top">${lcdThumb(device)}
+      <label>Shows
+        <select data-screen="${esc(device.id)}">
+          <option value="keep">Set in the full app</option>
+          <optgroup label="Unraid">${data.templates.map((item) => option(`template:${item.id}`, item.name)).join('')}</optgroup>
+          ${data.media.length ? `<optgroup label="Your media">${data.media.map((file) => option(`media:${file}`, fileName(file))).join('')}</optgroup>` : ''}
+          <option value="color">Solid colour</option>
+        </select></label>
+    </div>
     ${screen?.kind === 'color' ? `<label>Colour<input type="color" data-solid value="${hex(screen.rgb)}"></label>` : ''}
-    <label>Brightness: <span data-out>${device.brightness}%</span><input type="range" min="0" max="100" step="5" value="${device.brightness}" data-lcd-brightness></label>
+    <label><span class="slider-label"><span>Brightness</span><span data-out>${device.brightness}%</span></span><input type="range" min="0" max="100" step="5" value="${device.brightness}" data-lcd-brightness></label>
     <div class="two">
-      <label>Rotation<select data-lcd-rotation>${[0, 90, 180, 270].map((angle) => option(angle, `${angle}°`, angle === device.orientation)).join('')}</select></label>
-      <label>Colours<select data-lcd-theme>
+      <label style="margin-top:6px">Rotation<select data-lcd-rotation>${[0, 90, 180, 270].map((angle) => option(angle, `${angle}°`, angle === device.orientation)).join('')}</select></label>
+      <label style="margin-top:6px">Colours<select data-lcd-theme>
         ${option('', 'Same as all screens', !own)}
         ${Object.entries(presets).map(([key, preset]) => option(key, preset.label, own === key)).join('')}
         ${data.settings.customColors ? option('custom', 'Custom', own === 'custom') : ''}
@@ -369,28 +468,28 @@ function renderScreens() {
   const lcds = data.devices.filter((device) => device.hasLcd);
   let html = '';
   if (!lcds.length) {
-    html += `<div class="card notice"><b>No screens connected.</b><br>Each LCD fan needs its USB cable connected to the server. Screens appear here automatically afterwards. You can set everything below in the meantime.</div>`;
+    html += `<div class="card notice"><b>No screens connected.</b><br><span class="muted">Each LCD fan needs its USB cable connected to the server. Screens appear here automatically afterwards. You can set everything below in the meantime.</span></div>`;
   } else {
-    html += lcds.map(lcdCard).join('');
-    if (lcds.length > 1) html += '<div class="actions" style="margin:0 0 12px"><button class="btn" id="spread">Different stat on each fan</button></div>';
+    if (lcds.length > 1) html += '<div class="toolbar"><button class="btn" id="spread">Different stat on each fan</button></div>';
+    html += `<div class="cards">${lcds.map(lcdCard).join('')}</div>`;
   }
   html += themeCard();
   const uploaded = data.media.filter((file) => file.startsWith(`${data.uploadDir}/`));
-  html += `<div class="card"><h2>Your images and videos</h2>
+  html += `<div class="card"><div class="card-head"><h2>Your images and videos</h2></div>
     ${uploaded.map((file) => `<div class="row"><span>${esc(fileName(file))}</span><button class="btn danger" data-media-delete="${esc(file)}">Delete</button></div>`).join('')}
     <label>Add a file (images, GIFs and videos, up to 512 MB)<input type="file" id="upload" accept="image/png,image/jpeg,image/webp,image/bmp,image/gif,video/mp4,video/webm,video/quicktime,video/x-matroska,video/x-msvideo,.mkv,.avi"></label>
     <p class="muted" id="uploadNote">Files in the LCD media folder show up in the Shows list too.</p>
   </div>`;
   if (lcds.length) {
     const running = data.pixelClean[0];
-    html += `<div class="card"><h2>Pixel cleaning</h2>
-      <p class="muted" style="margin-top:0">Shows a moving pattern on the screens to reduce image retention.</p>
+    html += `<div class="card"><div class="card-head"><h2>Pixel cleaning</h2></div>
+      <p class="muted" style="margin:0">Shows a moving pattern on the screens to reduce image retention.</p>
       ${running ? `<div class="row"><span>Running, ${Math.ceil(running.remaining_seconds / 60)} minutes left</span><button class="btn" id="pixelStop">Stop</button></div>`
     : `<div class="two"><label>Run for<select id="pixelMinutes">${[15, 30, 60, 120].map((minutes) => option(minutes, `${minutes} minutes`, minutes === 30)).join('')}</select></label>
          <div class="actions" style="align-self:end"><button class="btn" id="pixelStart">Start</button></div></div>`}
     </div>`;
   }
-  html += `<div class="card"><h2>Unraid screens</h2><div class="gallery">${data.templates.map((item) => `<figure><img loading="lazy" alt="${esc(item.name)} preview" src="/api/preview?id=${encodeURIComponent(item.id)}"><figcaption>${esc(item.name.replace('Unraid: ', ''))}</figcaption></figure>`).join('')}</div>
+  html += `<div class="card"><div class="card-head"><h2>Unraid screens</h2></div><div class="gallery">${data.templates.map((item) => `<figure><img loading="lazy" alt="${esc(item.name)} preview" src="/api/preview?id=${encodeURIComponent(item.id)}"><figcaption>${esc(item.name.replace('Unraid: ', ''))}</figcaption></figure>`).join('')}</div>
     <p class="muted">Previews come from the daemon, so live values can show as blank here.</p></div>`;
   view.innerHTML = html;
   lcds.forEach((device) => { view.querySelector(`[data-screen="${CSS.escape(device.id)}"]`).value = screenValue(device); });
@@ -402,37 +501,41 @@ function scheduleCard(item, index) {
   const screens = [option('', "Don't change screen", !item.templateId)]
     .concat(data.templates.map((template) => option(template.id, template.name, item.templateId === template.id)));
   return `<div class="card" data-index="${index}">
-    <div class="row"><label class="check"><input type="checkbox" data-k="enabled" ${item.enabled ? 'checked' : ''}>On</label><button class="btn" data-remove>Remove</button></div>
-    <label>Name<input type="text" maxlength="40" data-k="name" value="${esc(item.name)}"></label>
+    <div class="card-head"><h2>${esc(item.name)}</h2><button class="btn" data-remove>Remove</button></div>
+    ${toggle('data-k="enabled"', 'On', item.enabled)}
+    <label style="margin-top:6px">Name<input type="text" maxlength="40" data-k="name" value="${esc(item.name)}"></label>
     <div class="two">
       <label>From<input type="time" data-k="start" value="${esc(item.start)}"></label>
       <label>Until<input type="time" data-k="end" value="${esc(item.end)}"></label>
     </div>
-    <label>Screen brightness: <span data-out>${item.brightness}%</span><input type="range" min="0" max="100" step="5" data-k="brightness" value="${item.brightness}"></label>
-    <label>Show<select data-k="templateId">${screens.join('')}</select></label>
-    <label class="check"><input type="checkbox" data-k="lightsOff" ${item.lightsOff ? 'checked' : ''}>Turn fan lights off too</label>
-    <label>Days (none ticked means every day)</label>
-    <div class="days">${DAYS.map((day, number) => `<label class="check"><input type="checkbox" data-day="${number}" ${item.days.includes(number) ? 'checked' : ''}>${day}</label>`).join('')}</div>
+    <label><span class="slider-label"><span>Screen brightness</span><span data-out>${item.brightness}%</span></span><input type="range" min="0" max="100" step="5" data-k="brightness" value="${item.brightness}"></label>
+    <label style="margin-top:6px">Show<select data-k="templateId">${screens.join('')}</select></label>
+    <div style="height:6px"></div>
+    ${toggle('data-k="lightsOff"', 'Turn fan lights off too', item.lightsOff)}
+    <label>Days (none picked means every day)</label>
+    <div class="days">${DAYS.map((day, number) => `<label class="day"><input type="checkbox" data-day="${number}" ${item.days.includes(number) ? 'checked' : ''}><span>${day}</span></label>`).join('')}</div>
   </div>`;
 }
 
 function renderAuto() {
   const alerts = data.settings.alerts;
   if (!scheduleDirty) drafts = JSON.parse(JSON.stringify(data.settings.schedules));
-  view.innerHTML = `<div class="card" id="alerts"><h2>Alerts on the screens</h2>
-      <label class="check"><input type="checkbox" id="aOn" ${alerts.enabled ? 'checked' : ''}>Take over all screens when something is wrong</label>
-      <label>Drive too hot at (°C)<input type="number" id="aTemp" min="30" max="70" value="${alerts.diskTempC}"></label>
-      <label class="check"><input type="checkbox" id="aDisk" ${alerts.diskProblem ? 'checked' : ''}>Disabled disks or read errors</label>
-      ${data.stats.hasArray ? `<label class="check"><input type="checkbox" id="aParity" ${alerts.parityErrors ? 'checked' : ''}>Parity errors</label>` : `<input type="checkbox" id="aParity" hidden ${alerts.parityErrors ? 'checked' : ''}>`}
-      <label class="check"><input type="checkbox" id="aStorage" ${alerts.storageFull ? 'checked' : ''}>Any pool nearly full</label>
-      <label>Nearly full at (%)<input type="number" id="aStoragePct" min="50" max="100" value="${alerts.storagePct}"></label>
+  view.innerHTML = `<div class="card" id="alerts"><div class="card-head"><h2>Alerts on the screens</h2></div>
+      ${toggle('id="aOn"', 'Take over all screens when something is wrong', alerts.enabled)}
+      ${toggle('id="aDisk"', 'Disabled disks or read errors', alerts.diskProblem)}
+      ${data.stats.hasArray ? toggle('id="aParity"', 'Parity errors', alerts.parityErrors) : `<input type="checkbox" id="aParity" hidden ${alerts.parityErrors ? 'checked' : ''}>`}
+      ${toggle('id="aStorage"', 'Any pool nearly full', alerts.storageFull)}
+      <div class="two">
+        <label>Drive too hot at (°C)<input type="number" id="aTemp" min="30" max="70" value="${alerts.diskTempC}"></label>
+        <label>Nearly full at (%)<input type="number" id="aStoragePct" min="50" max="100" value="${alerts.storagePct}"></label>
+      </div>
       <div class="actions"><button class="btn primary" id="aSave">Save alerts</button></div>
     </div>
-    <h2>Schedules</h2>
-    <div id="schedules">${drafts.map(scheduleCard).join('')}</div>
-    ${drafts.length ? '' : '<div class="card muted">No schedules yet.</div>'}
+    <div class="page-title"><h2>Schedules</h2></div>
+    <div id="schedules" class="${drafts.length ? 'cards' : ''}">${drafts.map(scheduleCard).join('')}</div>
+    ${drafts.length ? '' : '<div class="card empty">No schedules yet. Night mode dims the screens overnight.</div>'}
     <div class="actions"><button class="btn" id="addNight">Add night mode</button><button class="btn primary" id="sSave">Save schedules</button></div>
-    <p class="muted">Times use the server clock (${esc(data.timezone)}). Fan speeds aren't affected. An alert overrides any schedule's screen.</p>`;
+    <p class="footnote" style="margin-top:12px">Times use the server clock (${esc(data.timezone)}). Fan speeds aren't affected. An alert overrides any schedule's screen.</p>`;
 }
 
 // System ------------------------------------------------------------------
@@ -447,18 +550,19 @@ function deviceCard(device) {
       ? `<button class="btn primary" data-pair="bind" ${device.foreignOnline ? 'disabled' : ''}>Pair</button>`
       : '<button class="btn danger" data-pair="unbind">Unpair</button>';
   return `<div class="card" data-device="${esc(device.id)}">
-    <label>Name<input type="text" maxlength="40" data-rename value="${esc(data.settings.names[device.id] || '')}" placeholder="${esc(device.model)}"></label>
-    <p class="muted" style="margin:6px 0 0;overflow-wrap:anywhere">${esc(parts.join(', '))}</p>
-    ${device.foreignOnline ? '<p class="warn" style="margin:6px 0 0">Paired to another controller that is switched on. Turn that controller off to pair it here.</p>' : ''}
-    ${wireless ? `<div class="actions">${pairing}<button class="btn" data-identify>Identify</button></div>` : ''}
+    <label style="margin-top:0">Name<input type="text" maxlength="40" data-rename value="${esc(data.settings.names[device.id] || '')}" placeholder="${esc(device.model)}"></label>
+    <p class="muted" style="margin-top:8px;overflow-wrap:anywhere">${esc(parts.join(', '))}</p>
+    ${device.foreignOnline ? '<p class="warn">Paired to another controller that is switched on. Turn that controller off to pair it here.</p>' : ''}
+    ${wireless ? `<div class="actions"><button class="btn" data-identify>Identify</button>${pairing}</div>` : ''}
   </div>`;
 }
 
 function healthCard() {
-  if (!health) return '<div class="card"><h2>Installation health</h2><span class="muted">Checking…</span></div>';
-  if (health.error) return `<div class="card"><h2>Installation health</h2><span class="muted">${esc(health.error)}</span></div>`;
+  const head = '<div class="card-head"><h2>Installation health</h2></div>';
+  if (!health) return `<div class="card">${head}<span class="empty">Checking…</span></div>`;
+  if (health.error) return `<div class="card">${head}<span class="empty">${esc(health.error)}</span></div>`;
   const failed = (health.findings || []).filter((item) => item.state === 'failed');
-  return `<div class="card"><h2>Installation health</h2>
+  return `<div class="card">${head}
     ${failed.length ? failed.map((item) => `<div class="row" style="display:block"><b class="${item.severity === 'error' ? 'bad' : item.severity === 'warning' ? 'warn' : ''}">${esc(item.title)}</b><br><span class="muted">${esc(item.remediation)}</span></div>`).join('') : '<span class="good">All checks passed.</span>'}
     <div class="actions"><button class="btn" id="healthRefresh">Check again</button></div></div>`;
 }
@@ -466,27 +570,28 @@ function healthCard() {
 function renderSystem() {
   const settings = data.daemonSettings;
   const unbound = data.devices.filter((device) => device.unbound && !device.foreignOnline);
-  let html = '<h2>Devices</h2>';
-  if (unbound.length > 1) html += '<div class="actions" style="margin:0 0 12px"><button class="btn" id="pairAll">Pair all unpaired fans</button></div>';
-  html += data.devices.length ? data.devices.map(deviceCard).join('') : '<div class="card muted">No devices found.</div>';
+  let html = '<div class="page-title"><h2>Devices</h2></div>';
+  if (unbound.length > 1) html += '<div class="toolbar"><button class="btn" id="pairAll">Pair all unpaired fans</button></div>';
+  html += data.devices.length ? `<div class="cards">${data.devices.map(deviceCard).join('')}</div>` : '<div class="card empty">No devices found.</div>';
+  html += '<div class="split"><div>';
   if (settings) {
-    html += `<div class="card"><h2>Settings</h2>
-      <label class="check"><input type="checkbox" data-setting="turnOffLcds" ${settings.turnOffLcds ? 'checked' : ''}>Turn screens off when the container stops</label>
-      <label class="check"><input type="checkbox" data-setting="hardwareVideo" ${settings.hardwareVideo ? 'checked' : ''}>Use hardware video decoding</label>
-      <label class="check"><input type="checkbox" data-setting="rgbDrift" ${settings.rgbDrift ? 'checked' : ''}>Keep fan lights in sync with their saved colours</label>
+    html += `<div class="card"><div class="card-head"><h2>Settings</h2></div>
+      ${toggle('data-setting="turnOffLcds"', 'Turn screens off when the container stops', settings.turnOffLcds)}
+      ${toggle('data-setting="hardwareVideo"', 'Use hardware video decoding', settings.hardwareVideo)}
+      ${toggle('data-setting="rgbDrift"', 'Keep fan lights in sync with their saved colours', settings.rgbDrift)}
       <label>Video frame rate (1 to 60)<input type="number" min="1" max="60" data-setting-fps value="${settings.defaultFps ?? ''}" placeholder="Default"></label>
     </div>`;
   }
-  html += healthCard();
-  html += `<div class="card"><h2>Backup</h2><p class="muted" style="margin-top:0">Downloads the fan, lighting and screen settings plus this dashboard's settings as a JSON file.</p>
-    <a href="/api/export" download>Download settings</a></div>`;
+  html += `<div class="card"><div class="card-head"><h2>Backup</h2></div><p class="muted" style="margin:0 0 12px">Downloads the fan, lighting and screen settings plus this dashboard's settings as a JSON file.</p>
+    <a class="btn" href="/api/export" download>Download settings</a></div>`;
+  html += `</div><div>${healthCard()}</div></div>`;
   view.innerHTML = html;
 }
 
 const RENDER = { overview: renderOverview, fans: renderFans, lights: renderLights, screens: renderScreens, auto: renderAuto, system: renderSystem };
 
 function renderTabs() {
-  document.getElementById('tabs').innerHTML = TABS.map(([id, name]) => `<button role="tab" data-tab="${id}" aria-selected="${tab === id}">${name}</button>`).join('');
+  document.getElementById('tabs').innerHTML = TABS.map(([id, name]) => `<button role="tab" data-tab="${id}" aria-selected="${tab === id}">${icon(id)}<span>${name}</span></button>`).join('');
 }
 
 function interacting() {
@@ -522,6 +627,7 @@ async function refresh(force = false) {
     data = await response.json();
     if (tab === 'overview') await loadHistory();
     document.getElementById('fullApp').href = `http://${location.hostname}:${data.fullAppPort}/vnc.html?autoconnect=1&resize=remote`;
+    renderHealth();
     // Screens reloads preview images, so it only redraws when asked to.
     if (force === true || (!interacting() && tab !== 'screens' && tab !== 'auto')) RENDER[tab]();
   } catch (error) {
@@ -567,7 +673,7 @@ async function uploadFile(input) {
   const file = input.files[0];
   if (!file) return;
   if (file.size > MAX_UPLOAD) {
-    toast('Files can be up to 512 MB');
+    toast('Files can be up to 512 MB', true);
     return;
   }
   document.getElementById('uploadNote').textContent = `Uploading ${file.name}…`;
@@ -581,17 +687,18 @@ async function uploadFile(input) {
     if (!response.ok) throw await failure(response);
     toast('Uploaded');
   } catch (error) {
-    toast(error.message);
+    toast(error.message, true);
   }
   refresh(true);
 }
 
 document.getElementById('tabs').addEventListener('click', (event) => {
-  const id = event.target.dataset.tab;
+  const id = event.target.closest('[data-tab]')?.dataset.tab;
   if (!id) return;
   tab = id;
   chartHover = false;
   renderTabs();
+  window.scrollTo(0, 0);
   if (tab === 'system' && !health) loadHealth();
   if (tab === 'overview') loadHistory();
   if (data) RENDER[tab]();
@@ -650,10 +757,6 @@ view.addEventListener('change', (event) => {
   } else if (target.matches('[data-lcd-theme]')) {
     target.blur();
     act('/api/lcd', { device_id: deviceOf(target), theme: target.value || null });
-  } else if (target.id === 'themePick') {
-    themeDraft.theme = target.value;
-    target.blur();
-    renderScreens();
   } else if (target.dataset.themeColor) {
     document.getElementById('themeA').src = themePreview('unraid_drives');
     document.getElementById('themeB').src = themePreview('unraid_overview');
@@ -720,7 +823,7 @@ view.addEventListener('click', async (event) => {
       curveDraft = null;
       toast('Saved');
     } catch (error) {
-      toast(error.message);
+      toast(error.message, true);
     }
     refresh(true);
   } else if (target.matches('[data-rgb-all]')) {
@@ -738,6 +841,10 @@ view.addEventListener('click', async (event) => {
     const order = ['unraid_drives', 'unraid_array', 'unraid_system', 'unraid_overview'];
     const lcds = data.devices.filter((device) => device.hasLcd);
     actOnAll(lcds, (device) => post('/api/screen', { device_id: device.id, screen: { kind: 'template', templateId: order[lcds.indexOf(device) % order.length] } }));
+  } else if (set.themePick) {
+    themeDraft.theme = set.themePick;
+    view.querySelectorAll('[data-theme-pick]').forEach((button) => button.setAttribute('aria-pressed', button === target));
+    renderScreens();
   } else if (target.id === 'themeSave') {
     const body = { theme: themeDraft.theme, limits: themeDraft.limits };
     if (themeDraft.theme === 'custom') body.customColors = themeDraft.customColors;
@@ -746,7 +853,7 @@ view.addEventListener('click', async (event) => {
       themeDraft = null;
       toast('Saved');
     } catch (error) {
-      toast(error.message);
+      toast(error.message, true);
     }
     refresh(true);
   } else if (set.mediaDelete) {
@@ -783,7 +890,7 @@ view.addEventListener('click', async (event) => {
       scheduleDirty = false;
       toast('Saved');
     } catch (error) {
-      toast(error.message);
+      toast(error.message, true);
     }
     refresh(true);
   } else if (set.pair) {
@@ -834,6 +941,7 @@ view.addEventListener('pointerout', (event) => {
   chart.querySelector('[data-readout]').textContent = chart.dataset.latest;
 });
 
+document.getElementById('logo').innerHTML = icon('fans');
 renderTabs();
 refresh(true);
 setInterval(refresh, 4000);

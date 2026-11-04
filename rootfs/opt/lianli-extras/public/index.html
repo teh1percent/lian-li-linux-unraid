@@ -2,16 +2,23 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6fa">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d1016">
 <title>Lian Li Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b7cfa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Cpath d='M12 10c0-4 1-7 4-7s3 5-2 8M14 12c4 0 7 1 7 4s-5 3-8-2M12 14c0 4-1 7-4 7s-3-5 2-8M10 12c-4 0-7-1-7-4s5-3 8 2'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header>
-  <h1>Lian Li</h1>
-  <a id="fullApp" target="_blank" rel="noopener">Full app</a>
+  <div class="brand">
+    <span class="logo" id="logo" aria-hidden="true"></span>
+    <h1>Lian Li</h1>
+  </div>
+  <span class="health" id="health" role="status"></span>
+  <a class="btn link" id="fullApp" target="_blank" rel="noopener">Full app</a>
 </header>
-<nav role="tablist" id="tabs"></nav>
+<nav role="tablist" aria-label="Pages" id="tabs"></nav>
 <main id="view"></main>
 <div id="toast" role="status"></div>
 <script src="/app.js"></script>
