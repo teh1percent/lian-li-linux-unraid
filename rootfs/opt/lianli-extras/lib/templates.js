@@ -3,11 +3,46 @@
 // LCD templates installed into the daemon. Layouts are 400x400 and keep their
 // content inside the round area of the fan screens.
 
+const crypto = require('crypto');
 const { PRESETS, DEFAULT_LIMITS, themeColors } = require('./themes');
+const { toScreenSource } = require('./sources');
 
 const ALERT_WHITE = [255, 255, 255, 255];
 const ALERT_RED = { type: 'color', rgb: [120, 0, 0, 255] };
 const UPDATE_MS = 2000;
+const SYSTEM_TEMP_MIN = 20;
+const SYSTEM_TEMP_MAX = 100;
+const SYSTEM_TEMP_WARN = 70;
+const SYSTEM_TEMP_DANGER = 85;
+const MAX_TEMP_SENSORS = 32;
+const CPU_SENSOR = /^(k10temp|coretemp|zenpower|cpu_thermal)$/i;
+const CPU_MAIN_LABEL = /^(tctl|tdie|package id 0)$/i;
+
+// Temperature sensors worth a screen of their own, most useful first. Per-core
+// readings are left out: a big CPU has dozens, and they're still in the gauge list.
+function tempSensors(listed) {
+  const rank = ({ source }) => {
+    if (!CPU_SENSOR.test(source.name || '')) return 2;
+    return CPU_MAIN_LABEL.test(source.label || '') ? 0 : 1;
+  };
+  return (listed || [])
+    .filter((sensor) => sensor.source && sensor.source.type !== 'command' && (sensor.unit === 'C' || sensor.unit === '°C'))
+    .filter((sensor) => !/^core \d+$/i.test(sensor.source.label || ''))
+    .map((sensor, index) => ({ sensor, index }))
+    .sort((one, two) => rank(one.sensor) - rank(two.sensor) || one.index - two.index)
+    .slice(0, MAX_TEMP_SENSORS)
+    .map(({ sensor }) => {
+      const source = toScreenSource(sensor.source);
+      const name = sensor.display_name || `${sensor.sensor_name?.device_name || 'Sensor'}: ${sensor.sensor_name?.sensor_name || ''}`;
+      return {
+        key: crypto.createHash('sha1').update(JSON.stringify(source)).digest('hex').slice(0, 10),
+        name,
+        title: String(sensor.source.label || sensor.sensor_name?.sensor_name || name).toUpperCase().slice(0, 16),
+        source,
+        cpu: rank(sensor) < 2,
+      };
+    });
+}
 
 const rgba = (color) => [...color, 255];
 
@@ -33,7 +68,7 @@ function template(id, name, background, widgets) {
   return { id, name, base_width: 400, base_height: 400, rotated: false, target_device: null, background, widgets };
 }
 
-function buildScreens(statsDir, volumes, colors, limits) {
+function buildScreens(statsDir, volumes, colors, limits, sensors = []) {
   const stat = (key) => ({ type: 'command', cmd: `cat ${statsDir}/${key}` });
   const background = { type: 'color', rgb: rgba(colors.background) };
   const text = rgba(colors.text);
@@ -64,37 +99,75 @@ function buildScreens(statsDir, volumes, colors, limits) {
     label('unit', '% used', 266, 26, { color: muted }),
     value('free', stat(freeKey), 312, 26, { width: 200, unit: ' TB free', format: '{:.1}', color: muted }),
   ]);
+  const drives = (id, name, title, tempKey, activeKey) => template(id, name, background, [
+    gauge(stat(tempKey), 20, 65, thresholds(limits.tempWarn, limits.tempDanger, 20, 65)),
+    label('title', title, 84, 36, { color: text }),
+    value('temp', stat(tempKey), 186, 120, { max: 65, color: text }),
+    label('unit', 'hottest °C', 266, 26, { color: muted }),
+    value('active', stat(activeKey), 312, 26, { width: 160, unit: ' awake', color: muted }),
+  ]);
+  const overview = (id, name, title, tempKey, usedKey, freeKey, activeKey) => template(id, name, background, [
+    label('title', title, 64, 36, { color: text }),
+    label('temp_l', 'Hottest', 126, 30, { x: 125, width: 150, color: muted, align: 'left' }),
+    value('temp', stat(tempKey), 126, 42, { x: 280, width: 130, unit: '°', align: 'right', ranges: thresholds(limits.tempWarn, limits.tempDanger, 0, 65), max: 65, color: text }),
+    label('used_l', 'Used', 190, 30, { x: 125, width: 150, color: muted, align: 'left' }),
+    value('used', stat(usedKey), 190, 42, { x: 280, width: 130, unit: '%', align: 'right', ranges: storageRanges, color: text }),
+    label('free_l', 'Free TB', 254, 30, { x: 125, width: 150, color: muted, align: 'left' }),
+    value('free', stat(freeKey), 254, 42, { x: 280, width: 130, format: '{:.1}', align: 'right', max: 100000, color: text }),
+    label('awake_l', 'Awake', 318, 30, { x: 140, width: 110, color: muted, align: 'left' }),
+    value('awake', stat(activeKey), 318, 42, { x: 260, width: 120, align: 'right', max: 1000, color: text }),
+  ]);
+  // CPU, memory, CPU temperature when the machine reports one, then drives.
+  const systemRows = () => {
+    const cpuRanges = thresholds(limits.cpuWarn, limits.cpuDanger);
+    const cpuSensor = sensors.find((sensor) => sensor.cpu);
+    const rows = [
+      ['cpu', 'CPU', { type: 'cpu_usage' }, { unit: '%', ranges: cpuRanges }],
+      ['mem', 'RAM', { type: 'mem_usage' }, { unit: '%', ranges: cpuRanges }],
+      ...(cpuSensor ? [['ctemp', 'CPU temp', cpuSensor.source, { unit: '°', max: SYSTEM_TEMP_MAX, ranges: thresholds(SYSTEM_TEMP_WARN, SYSTEM_TEMP_DANGER) }]] : []),
+      ['dtemp', 'Drives', stat('disk_temp_max'), { unit: '°', max: 65, ranges: thresholds(limits.tempWarn, limits.tempDanger, 0, 65) }],
+    ];
+    const spacing = 64;
+    const first = 126 + (4 - rows.length) * (spacing / 2);
+    return [
+      label('title', 'SYSTEM', 64, 36, { color: text }),
+      ...rows.flatMap(([id, text_, source, options], index) => [
+        label(`${id}_l`, text_, first + index * spacing, 30, { x: 125, width: 150, color: muted, align: 'left' }),
+        value(id, source, first + index * spacing, 42, { x: 280, width: 130, align: 'right', color: text, ...options }),
+      ]),
+    ];
+  };
 
   return [
-    template('unraid_drives', 'Unraid: Drives', background, [
-      gauge(stat('disk_temp_max'), 20, 65, thresholds(limits.tempWarn, limits.tempDanger, 20, 65)),
-      label('title', 'DRIVES', 84, 36, { color: text }),
-      value('temp', stat('disk_temp_max'), 186, 120, { max: 65, color: text }),
-      label('unit', 'hottest °C', 266, 26, { color: muted }),
-      value('active', stat('disks_active'), 312, 26, { width: 160, unit: ' awake', color: muted }),
-    ]),
+    drives('unraid_drives', 'Unraid: Drives', 'DRIVES', 'disk_temp_max', 'disks_active'),
     storage('unraid_array', 'Unraid: Storage (picked on Status)', 'STORAGE', 'storage_used_pct', 'storage_free_tb'),
-    template('unraid_system', 'Unraid: System', background, [
+    template('unraid_system', 'System: CPU', background, [
       gauge({ type: 'cpu_usage' }, 0, 100, thresholds(limits.cpuWarn, limits.cpuDanger)),
       label('title', 'CPU', 84, 36, { color: text }),
       value('cpu', { type: 'cpu_usage' }, 186, 120, { color: text }),
       label('unit', '% load', 266, 26, { color: muted }),
       value('mem', { type: 'mem_usage' }, 312, 26, { width: 180, unit: '% RAM', color: muted }),
     ]),
-    template('unraid_overview', 'Unraid: Overview', background, [
-      label('title', 'UNRAID', 64, 36, { color: text }),
-      label('temp_l', 'Hottest', 126, 30, { x: 125, width: 150, color: muted, align: 'left' }),
-      value('temp', stat('disk_temp_max'), 126, 42, { x: 280, width: 130, unit: '°', align: 'right', ranges: thresholds(limits.tempWarn, limits.tempDanger, 0, 65), max: 65, color: text }),
-      label('used_l', 'Used', 190, 30, { x: 125, width: 150, color: muted, align: 'left' }),
-      value('used', stat('storage_used_pct'), 190, 42, { x: 280, width: 130, unit: '%', align: 'right', ranges: storageRanges, color: text }),
-      label('free_l', 'Free TB', 254, 30, { x: 125, width: 150, color: muted, align: 'left' }),
-      value('free', stat('storage_free_tb'), 254, 42, { x: 280, width: 130, format: '{:.1}', align: 'right', max: 100000, color: text }),
-      label('awake_l', 'Awake', 318, 30, { x: 140, width: 110, color: muted, align: 'left' }),
-      value('awake', stat('disks_active'), 318, 42, { x: 260, width: 120, align: 'right', max: 1000, color: text }),
+    overview('unraid_overview', 'Unraid: Overview', 'UNRAID', 'disk_temp_max', 'storage_used_pct', 'storage_free_tb', 'disks_active'),
+    ...volumes.flatMap(({ name, key }) => [
+      storage(`unraid_volume_${key}`, `Unraid: Storage, ${name}`, name.toUpperCase(), `volume_${key}_used_pct`, `volume_${key}_free_tb`),
+      drives(`unraid_drives_${key}`, `Unraid: Drives, ${name}`, name.toUpperCase(), `volume_${key}_temp_max`, `volume_${key}_active`),
+      overview(`unraid_overview_${key}`, `Unraid: Overview, ${name}`, name.toUpperCase(), `volume_${key}_temp_max`, `volume_${key}_used_pct`, `volume_${key}_free_tb`, `volume_${key}_active`),
     ]),
-    ...volumes.map(({ name, key }) => storage(
-      `unraid_volume_${key}`, `Unraid: ${name}`, name.toUpperCase(), `volume_${key}_used_pct`, `volume_${key}_free_tb`,
-    )),
+    template('unraid_memory', 'System: Memory', background, [
+      gauge({ type: 'mem_usage' }, 0, 100, thresholds(limits.cpuWarn, limits.cpuDanger)),
+      label('title', 'MEMORY', 84, 36, { color: text }),
+      value('used', { type: 'mem_usage' }, 186, 120, { color: text }),
+      label('unit', '% used', 266, 26, { color: muted }),
+      value('gb', { type: 'mem_used' }, 312, 26, { width: 200, unit: ' GB used', format: '{:.1}', max: 100000, color: muted }),
+    ]),
+    template('unraid_sysinfo', 'System: Overview', background, systemRows()),
+    ...sensors.map((sensor) => template(`unraid_temp_${sensor.key}`, `System: ${sensor.name}`, background, [
+      gauge(sensor.source, SYSTEM_TEMP_MIN, SYSTEM_TEMP_MAX, thresholds(SYSTEM_TEMP_WARN, SYSTEM_TEMP_DANGER, SYSTEM_TEMP_MIN, SYSTEM_TEMP_MAX)),
+      label('title', sensor.title, 84, sensor.title.length > 10 ? 26 : 36, { color: text }),
+      value('temp', sensor.source, 186, 120, { max: SYSTEM_TEMP_MAX, color: text }),
+      label('unit', '°C', 266, 26, { color: muted }),
+    ])),
   ];
 }
 
@@ -129,20 +202,37 @@ function buildAlerts(statsDir) {
   ];
 }
 
-function buildTemplates(statsDir, volumes = [], colors = PRESETS.default, limits = DEFAULT_LIMITS) {
-  return [...buildScreens(statsDir, volumes, colors, limits), ...buildAlerts(statsDir)];
+function buildTemplates(statsDir, volumes = [], colors = PRESETS.default, limits = DEFAULT_LIMITS, sensors = []) {
+  return [...buildScreens(statsDir, volumes, colors, limits, sensors), ...buildAlerts(statsDir)];
+}
+
+// How the generated screens are offered: one entry per screen, with the pool or
+// sensor picked separately on each LCD.
+function screenFamilies(volumes = [], sensors = []) {
+  const pools = (first, id) => [first, ...volumes.map(({ name, key }) => ({ id: id(key), name }))];
+  const family = (group, name, choiceLabel, choices) => ({ group, name, choiceLabel, choices });
+  const same = 'Same as Status page';
+  return [
+    family('Unraid', 'Drives', 'Pool', pools({ id: 'unraid_drives', name: 'All drives' }, (key) => `unraid_drives_${key}`)),
+    family('Unraid', 'Storage', 'Pool', pools({ id: 'unraid_array', name: same }, (key) => `unraid_volume_${key}`)),
+    family('Unraid', 'Overview', 'Pool', pools({ id: 'unraid_overview', name: same }, (key) => `unraid_overview_${key}`)),
+    family('System', 'CPU usage', null, [{ id: 'unraid_system', name: 'CPU usage' }]),
+    family('System', 'Memory usage', null, [{ id: 'unraid_memory', name: 'Memory usage' }]),
+    family('System', 'System overview', null, [{ id: 'unraid_sysinfo', name: 'System overview' }]),
+    ...(sensors.length ? [family('System', 'Temperature', 'Sensor', sensors.map((sensor) => ({ id: `unraid_temp_${sensor.key}`, name: sensor.name })))] : []),
+  ];
 }
 
 const themedId = (id, theme) => `${id}__${theme}`;
 
 // Everything the settings call for: each screen in the main theme, plus copies
 // for any other theme that a single LCD uses.
-function wantedTemplates(statsDir, volumes, settings) {
+function wantedTemplates(statsDir, volumes, settings, sensors = []) {
   const main = themeColors(settings, settings.theme);
-  const wanted = buildTemplates(statsDir, volumes, main, settings.limits);
+  const wanted = buildTemplates(statsDir, volumes, main, settings.limits, sensors);
   const others = new Set(Object.values(settings.lcdThemes).filter((theme) => theme !== settings.theme));
   for (const theme of others) {
-    for (const screen of buildScreens(statsDir, volumes, themeColors(settings, theme), settings.limits)) {
+    for (const screen of buildScreens(statsDir, volumes, themeColors(settings, theme), settings.limits, sensors)) {
       wanted.push({ ...screen, id: themedId(screen.id, theme), name: `${screen.name} (${theme})` });
     }
   }
@@ -173,4 +263,4 @@ async function installTemplates(daemon, wanted) {
   return true;
 }
 
-module.exports = { buildTemplates, wantedTemplates, installTemplates, contains, themedId };
+module.exports = { buildTemplates, wantedTemplates, installTemplates, contains, themedId, tempSensors, screenFamilies };

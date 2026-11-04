@@ -180,7 +180,7 @@ function tile(iconName, label, value, tone = '') {
 }
 
 function storageCard(stats) {
-  const picker = stats.volumes.length > 1 ? `<label>Show on this page and the LCD screens
+  const picker = stats.volumes.length > 1 ? `<label>Show on this page and on screens set to follow it
     <select data-storage>
       ${option('all', 'All storage', stats.selectedVolume === 'all')}
       ${stats.volumes.map((volume) => option(volume.key, volume.name, stats.selectedVolume === volume.key)).join('')}
@@ -475,6 +475,36 @@ function screenValue(device) {
   return screen.kind === 'template' ? `template:${screen.templateId}` : `media:${screen.path}`;
 }
 
+// The family a generated screen belongs to, so an LCD can pick the screen and
+// its pool or sensor separately.
+function familyOf(templateId) {
+  return data.screenFamilies.find((family) => family.choices.some((choice) => choice.id === templateId)) || null;
+}
+
+function shownScreenValue(device) {
+  const value = screenValue(device);
+  if (!value.startsWith('template:')) return value;
+  const family = familyOf(value.slice(9));
+  return family ? `template:${family.choices[0].id}` : value;
+}
+
+function screenVariant(device, screen) {
+  if (screen?.kind !== 'template') return '';
+  const family = familyOf(screen.templateId);
+  if (!family || family.choices.length < 2) return '';
+  return `<label>${esc(family.choiceLabel)}<select data-screen-variant="${esc(device.id)}">
+    ${family.choices.map((choice) => option(choice.id, choice.name, choice.id === screen.templateId)).join('')}
+  </select></label>`;
+}
+
+function screenOptions(device, screen) {
+  const groups = ['Unraid', 'System'].map((group) => `<optgroup label="${group}">${data.screenFamilies.filter((family) => family.group === group)
+    .map((family) => option(`template:${family.choices[0].id}`, family.name)).join('')}</optgroup>`);
+  // A screen for a sensor or pool that's gone stays visible until it's changed.
+  const known = screen?.kind !== 'template' || familyOf(screen.templateId) || data.designs.some((item) => item.id === screen.templateId);
+  return `${groups.join('')}${known ? '' : option(`template:${screen.templateId}`, 'Earlier screen')}`;
+}
+
 function draftColors() {
   const { keys, presets } = data.themes;
   const source = themeDraft.theme === 'custom' ? themeDraft.customColors : presets[themeDraft.theme];
@@ -512,7 +542,7 @@ function themeCard() {
     <h3>When colours change</h3>
     <div class="two">${limit('tempWarn', 'Drive warning °C', 20, 65)}${limit('tempDanger', 'Drive danger °C', 20, 65)}</div>
     <div class="two">${limit('storageWarn', 'Storage warning %', 0, 100)}${limit('storageDanger', 'Storage danger %', 0, 100)}</div>
-    <div class="two">${limit('cpuWarn', 'CPU warning %', 0, 100)}${limit('cpuDanger', 'CPU danger %', 0, 100)}</div>
+    <div class="two">${limit('cpuWarn', 'CPU and memory warning %', 0, 100)}${limit('cpuDanger', 'CPU and memory danger %', 0, 100)}</div>
     <div class="actions"><button class="btn primary" id="themeSave">Save colours</button></div>
     <p class="muted">Applies to the Unraid screens. Alert screens stay red so they always stand out.</p>
   </div>`;
@@ -541,13 +571,14 @@ function lcdCard(device) {
       <label>Shows
         <select data-screen="${esc(device.id)}">
           <option value="keep">Leave as it is</option>
-          <optgroup label="Unraid">${data.templates.map((item) => option(`template:${item.id}`, item.name)).join('')}</optgroup>
+          ${screenOptions(device, screen)}
           ${data.designs.length ? `<optgroup label="Your designs">${data.designs.map((item) => option(`template:${item.id}`, item.name)).join('')}</optgroup>` : ''}
           ${data.media.length ? `<optgroup label="Your media">${data.media.map((file) => option(`media:${file}`, fileName(file))).join('')}</optgroup>` : ''}
           <option value="sensor">Sensor gauge</option>
           <option value="color">Solid colour</option>
         </select></label>
     </div>
+    ${screenVariant(device, screen)}
     ${screen?.kind === 'color' ? `<label>Colour<input type="color" data-solid value="${hex(screen.rgb)}"></label>` : ''}
     ${lcdMore(device, screen)}
     <label><span class="slider-label"><span>Brightness</span><span data-out>${device.brightness}%</span></span><input type="range" min="0" max="100" step="5" value="${device.brightness}" data-lcd-brightness></label>
@@ -591,7 +622,7 @@ function renderScreens() {
     <p class="muted">Previews come from the daemon, so live values can show as blank here.</p></div>`;
   html += catalogCard() + storageCleanupCard();
   view.innerHTML = html;
-  lcds.forEach((device) => { view.querySelector(`[data-screen="${CSS.escape(device.id)}"]`).value = screenValue(device); });
+  lcds.forEach((device) => { view.querySelector(`[data-screen="${CSS.escape(device.id)}"]`).value = shownScreenValue(device); });
 }
 
 // Automation --------------------------------------------------------------
@@ -691,7 +722,7 @@ function renderSystem() {
   html += `<div class="card"><div class="card-head"><h2>Backup</h2></div><p class="muted" style="margin:0 0 12px">Downloads the fan, lighting and screen settings plus this dashboard's settings as a JSON file.</p>
     <a class="btn" href="/api/export" download>Download settings</a></div>`;
   html += backupsCard();
-  html += `</div><div>${healthCard()}${diagnosticsCard()}${updateCard()}</div></div>`;
+  html += `</div><div>${healthCard()}${diagnosticsCard()}${updateCard()}${aboutCard()}</div></div>`;
   view.innerHTML = html;
 }
 
@@ -866,6 +897,9 @@ view.addEventListener('change', (event) => {
   } else if (target.matches('[data-storage]')) {
     target.blur();
     act('/api/storage', { volume: target.value });
+  } else if (target.dataset.screenVariant) {
+    target.blur();
+    act('/api/screen', { device_id: target.dataset.screenVariant, screen: { kind: 'template', templateId: target.value } });
   } else if (target.matches('[data-screen]')) {
     const [kind, ...rest] = target.value.split(':');
     const value = rest.join(':');

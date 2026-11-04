@@ -79,6 +79,15 @@ function updateCard() {
     <button class="btn" id="updateCheck">Check for updates</button></div>`;
 }
 
+function aboutCard() {
+  const link = (url, text) => `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
+  return `<div class="card" id="about"><div class="card-head"><h2>About</h2></div>
+    <div class="row"><span>Lian Li Linux version</span><span class="num">${esc(data.daemon?.version || 'Not connected')}</span></div>
+    <p class="muted" style="margin:10px 0 0">Built on ${link('https://github.com/sgtaziz/lian-li-linux', 'Lian Li Linux')} by ${link('https://github.com/sgtaziz', 'sgtaziz')}, who wrote the software that controls the hardware. MIT License, copyright 2026 sgtaziz.</p>
+    <p class="muted" style="margin:10px 0 0">Unraid package and dashboard by ${link('https://github.com/teh1percent/lian-li-linux-unraid', 'teh1percent')}. Not affiliated with Lian Li Industrial Co., Ltd.</p>
+  </div>`;
+}
+
 async function loadBackups() {
   const response = await fetch('/api/backups');
   if (!response.ok) throw await failure(response);

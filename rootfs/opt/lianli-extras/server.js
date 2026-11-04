@@ -17,7 +17,7 @@ const { History } = require('./lib/history');
 const { createLights } = require('./lib/lights');
 const { createMaintenance } = require('./lib/maintenance');
 const { createScreens } = require('./lib/screens');
-const { buildTemplates } = require('./lib/templates');
+const { buildTemplates, screenFamilies } = require('./lib/templates');
 const { COLOR_KEYS, PRESETS, DEFAULT_LIMITS, isColor, validColors, pickColors, validLimits, themeExists, themeColors } = require('./lib/themes');
 const { readStats, selectStorage, writeStats } = require('./lib/unraid');
 
@@ -87,7 +87,7 @@ function createApp({ daemon, engine, store, options, history }) {
   const publicDir = path.join(__dirname, 'public');
   const alertIds = new Set(Object.values(ALERT_TEMPLATES));
   const selectable = (colors = PRESETS.default, limits = store.data.limits) => (
-    buildTemplates(options.statsDir, engine.getStats().volumes, colors, limits).filter((item) => !alertIds.has(item.id))
+    buildTemplates(options.statsDir, engine.getStats().volumes, colors, limits, engine.systemSensors).filter((item) => !alertIds.has(item.id))
   );
   const passwordHash = options.password
     ? crypto.createHash('sha256').update(options.password).digest()
@@ -186,6 +186,7 @@ function createApp({ daemon, engine, store, options, history }) {
       media: allMedia(),
       uploadDir: uploadDir(),
       templates: selectable().map(({ id, name }) => ({ id, name })),
+      screenFamilies: screenFamilies(engine.getStats().volumes, engine.systemSensors),
       themes: { keys: COLOR_KEYS, presets: PRESETS, defaultLimits: DEFAULT_LIMITS },
     };
     try {

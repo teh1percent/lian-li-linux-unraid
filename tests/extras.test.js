@@ -10,7 +10,7 @@ const extras = path.join(__dirname, '..', 'rootfs', 'opt', 'lianli-extras');
 const { DaemonClient } = require(path.join(extras, 'lib', 'daemon'));
 const { Engine, Store, scheduleActive } = require(path.join(extras, 'lib', 'engine'));
 const { History } = require(path.join(extras, 'lib', 'history'));
-const { buildTemplates } = require(path.join(extras, 'lib', 'templates'));
+const { buildTemplates, tempSensors } = require(path.join(extras, 'lib', 'templates'));
 const { computeStats, readStats, writeStats, EMPTY_VALUES } = require(path.join(extras, 'lib', 'unraid'));
 const { createApp } = require(path.join(extras, 'server'));
 const { createMockDaemon } = require('./mock-daemon');
@@ -947,4 +947,61 @@ test('catalog templates install only when their checksum matches', async () => {
   } finally {
     server.close();
   }
+});
+
+test('each screen can show its own pool', async () => {
+  const volumes = stats.volumes;
+  assert.ok(volumes.length > 0);
+  const { key, name } = volumes[0];
+  const state = await stateOf();
+  const drives = state.screenFamilies.find((family) => family.name === 'Drives');
+  assert.deepStrictEqual(drives.choices.map((choice) => choice.name), ['All drives', ...volumes.map((volume) => volume.name)]);
+  await engine.tick();
+  for (const [lcd, id] of [[LCD1, `unraid_drives_${key}`], ['usb:1-3', `unraid_overview_${key}`], ['usb:1-4', `unraid_volume_${key}`]]) {
+    assert.strictEqual((await call('/api/screen', { device_id: lcd, screen: { kind: 'template', templateId: id } })).status, 200, id);
+    assert.strictEqual(entryFor(lcd).template_id, id);
+  }
+  const stored = mock.state.templates.find((item) => item.id === `unraid_drives_${key}`);
+  assert.ok(stored.widgets.some((widget) => widget.kind.source?.cmd?.endsWith(`volume_${key}_temp_max`)), name);
+  assert.ok(stored.widgets.some((widget) => widget.kind.source?.cmd?.endsWith(`volume_${key}_active`)));
+  assert.ok('volume_' + key + '_active' in stats.values);
+});
+
+test('system screens show CPU, memory and temperature sensors', async () => {
+  await engine.tick();
+  const ids = mock.state.templates.map((item) => item.id);
+  for (const id of ['unraid_system', 'unraid_memory', 'unraid_sysinfo']) assert.ok(ids.includes(id), id);
+  const state = await stateOf();
+  const temps = state.screenFamilies.find((family) => family.name === 'Temperature');
+  assert.deepStrictEqual(temps.choices.map((choice) => choice.name), ['CPU temperature']);
+  const id = temps.choices[0].id;
+  assert.ok(ids.includes(id));
+  assert.strictEqual((await call('/api/screen', { device_id: LCD1, screen: { kind: 'template', templateId: id } })).status, 200);
+  assert.strictEqual(entryFor(LCD1).template_id, id);
+  const sysinfo = mock.state.templates.find((item) => item.id === 'unraid_sysinfo');
+  assert.strictEqual(sysinfo.widgets.find((widget) => widget.id === 'ctemp').kind.source.name, 'k10temp');
+  const all = JSON.stringify(mock.state.templates);
+  assert.ok(!all.includes('rm -rf'), "other sensors' commands never reach a screen");
+});
+
+test('temperature sensors skip commands and per-core readings, with the CPU first', () => {
+  const hwmon = (name, label) => ({ source: { type: 'hwmon', name, label, device_path: '/x' }, display_name: `${name}: ${label}`, unit: 'C' });
+  const sensors = tempSensors([
+    hwmon('nvme', 'Composite'),
+    hwmon('coretemp', 'Core 3'),
+    hwmon('coretemp', 'Package id 0'),
+    { source: { type: 'command', cmd: 'id' }, display_name: 'x', unit: 'C' },
+    { source: { type: 'cpu_usage' }, display_name: 'CPU', unit: '%' },
+  ]);
+  assert.deepStrictEqual(sensors.map((sensor) => sensor.name), ['coretemp: Package id 0', 'nvme: Composite']);
+  assert.strictEqual(new Set(sensors.map((sensor) => sensor.key)).size, 2);
+  assert.strictEqual(sensors[0].cpu, true);
+  assert.strictEqual(sensors[1].cpu, false);
+});
+
+test('the system page script carries the version and credits', async () => {
+  const script = await (await call('/system-more.js')).text();
+  assert.ok(script.includes('https://github.com/sgtaziz/lian-li-linux'));
+  assert.ok(script.includes('data.daemon?.version'));
+  assert.strictEqual((await stateOf()).daemon.version, '1.2.3');
 });

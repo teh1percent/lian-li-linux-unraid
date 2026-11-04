@@ -130,6 +130,7 @@ function computeStats(disksText, varText) {
         [`volume_${volumeKey(volume.name)}_used_pct`, round(usedPct(volume))],
         [`volume_${volumeKey(volume.name)}_free_tb`, round(volume.free / KB_PER_TB)],
         [`volume_${volumeKey(volume.name)}_temp_max`, hottest(volume.members)],
+        [`volume_${volumeKey(volume.name)}_active`, volume.members.filter((disk) => Number(disk.temp) > 0).length],
       ])),
     },
     hasTemps: temps.length > 0,

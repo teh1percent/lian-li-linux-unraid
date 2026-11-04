@@ -106,8 +106,11 @@ Open `http://<server>:6090` on a phone or computer.
   effect across several devices. The **OpenRGB server** lets OpenRGB control the
   lights; it has no password, and you publish its port in the container settings.
 - **Screens:** what each LCD shows (an Unraid screen, your own design, a sensor gauge,
-  your own file or a solid colour), brightness, rotation and colours. Each pool has
-  its own screen, and new pools get one automatically. Files can be positioned and
+  your own file or a solid colour), brightness, rotation and colours. The Drives,
+  Storage and Overview screens have a **Pool** choice on each LCD, so each screen can
+  show a different pool, and new pools appear automatically. **System** screens show
+  CPU usage, memory usage, a system overview, or any temperature sensor (chosen on
+  each LCD; these gauges change colour at 70 and 85 °C). Files can be positioned and
   zoomed, and videos can set their frame rate. **Startup image** sets what a screen
   shows at power-on. **Screen designs** is a drag-and-drop designer with text, gauges,
   bars, charts, clocks, images and video. **Template catalog** installs ready-made
@@ -120,7 +123,8 @@ Open `http://<server>:6090` on a phone or computer.
 - **System:** pair, unpair, take over, identify, rename and restart devices. General
   settings include the USB backend and a temperature alert on the lights. **Restore a
   backup** previews and restores the daemon's own backups. Also here: Installation
-  Health, a diagnostics report, an update check and a settings download.
+  Health, a diagnostics report, an update check, a settings download, and the version
+  and credits under **About**.
 
 An LCD left on **Leave as it is** is only touched while an alert or a screen-swapping
 schedule is active, and is restored afterwards.
@@ -142,6 +146,13 @@ Settings are stored in `extras/settings.json` in AppData, chart data in
 `extras/history.json` and uploads in `extras/media`. The current values are
 files in `/run/lianli-stats` inside the container, and they appear in the sensor
 lists on the dashboard.
+
+## Credits
+
+Built on [Lian Li Linux](https://github.com/sgtaziz/lian-li-linux) by
+[sgtaziz](https://github.com/sgtaziz), which does all the work of talking to the
+hardware. It's MIT licensed, copyright 2026 sgtaziz. This repo adds the Unraid
+packaging and the dashboard. Not affiliated with Lian Li Industrial Co., Ltd.
 
 ## How it works around the container check
 

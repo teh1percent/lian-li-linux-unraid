@@ -7,8 +7,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { installTemplates, wantedTemplates, themedId } = require('./templates');
+const { installTemplates, wantedTemplates, themedId, tempSensors } = require('./templates');
 const { DEFAULT_LIMITS } = require('./themes');
+
+const SENSOR_REFRESH_MS = 5 * 60 * 1000;
 
 const TEMP_CLEAR_MARGIN = 2;
 const MEDIA_TYPES = {
@@ -118,6 +120,7 @@ function findEntry(config, deviceId) {
 
 class Engine {
   constructor({ daemon, store, statsDir, getStats, now = () => new Date() }) {
+    this.systemSensors = [];
     this.daemon = daemon;
     this.store = store;
     this.statsDir = statsDir;
@@ -192,15 +195,26 @@ class Engine {
     });
   }
 
+  // Sensors rarely change and listing them reads the hardware, so not every tick.
+  async refreshSensors() {
+    const now = this.now().getTime();
+    if (this.sensorsRead !== undefined && now - this.sensorsRead < SENSOR_REFRESH_MS) return;
+    const listed = await this.daemon.request('ListSensors').catch(() => null);
+    if (!listed) return;
+    this.systemSensors = tempSensors(listed);
+    this.sensorsRead = now;
+  }
+
   async run() {
     const info = await this.daemon.request('GetDaemonInfo');
     if (info.instance_id !== this.instance) this.brightness.clear();
     // Screens are generated, so new pools and new colours need installing too.
     const { volumes = [] } = this.getStats();
+    await this.refreshSensors();
     const { theme, customColors, lcdThemes, limits } = this.store.data;
-    const installed = JSON.stringify([info.instance_id, volumes.map((volume) => volume.key), theme, customColors, lcdThemes, limits]);
+    const installed = JSON.stringify([info.instance_id, volumes.map((volume) => volume.key), this.systemSensors.map((sensor) => sensor.key), theme, customColors, lcdThemes, limits]);
     if (installed !== this.installed) {
-      await installTemplates(this.daemon, wantedTemplates(this.statsDir, volumes, this.store.data));
+      await installTemplates(this.daemon, wantedTemplates(this.statsDir, volumes, this.store.data, this.systemSensors));
       this.installed = installed;
     }
     this.instance = info.instance_id;
