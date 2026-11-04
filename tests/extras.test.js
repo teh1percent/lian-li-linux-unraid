@@ -9,6 +9,7 @@ const { test, beforeEach, afterEach } = require('node:test');
 const extras = path.join(__dirname, '..', 'rootfs', 'opt', 'lianli-extras');
 const { DaemonClient } = require(path.join(extras, 'lib', 'daemon'));
 const { Engine, Store, scheduleActive } = require(path.join(extras, 'lib', 'engine'));
+const { History } = require(path.join(extras, 'lib', 'history'));
 const { buildTemplates } = require(path.join(extras, 'lib', 'templates'));
 const { computeStats, readStats, writeStats, EMPTY_VALUES } = require(path.join(extras, 'lib', 'unraid'));
 const { createApp } = require(path.join(extras, 'server'));
@@ -42,7 +43,7 @@ beforeEach(async () => {
   fs.mkdirSync(media);
   fs.writeFileSync(path.join(media, 'logo.png'), 'x');
   fs.writeFileSync(path.join(media, 'notes.txt'), 'x');
-  http = createApp({ daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: media, fullAppPort: 6081, password: '' } });
+  http = createApp({ daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: media, uploadDir: path.join(dir, 'uploads'), fullAppPort: 6081, password: '' } });
   await listen(http, 0);
   base = `http://127.0.0.1:${http.address().port}`;
 });
@@ -353,6 +354,277 @@ test('state reports devices, stats and media, and survives a stopped daemon', as
   await new Promise((resolve) => { mock.server.close(resolve); mock.server = { close: (done) => done() }; });
   state = await (await call('/api/state')).json();
   assert.strictEqual(state.daemon.connected, false);
+});
+
+const FAN = 'wireless:1c:17:07:f5:10';
+const gaugeColors = (template) => template.widgets.find((widget) => widget.id === 'gauge').kind.ranges.map((range) => range.color.join());
+const stored = (id) => mock.state.templates.find((item) => item.id === id);
+
+test('a theme recolours the Unraid screens and limits move, but alerts stay red', async () => {
+  await engine.tick();
+  const red = JSON.stringify(stored('unraid_alert_temp').background);
+  assert.strictEqual((await call('/api/theme', { theme: 'ocean', limits: { ...store.data.limits, storageWarn: 50, storageDanger: 60 } })).status, 200);
+  assert.strictEqual(engine.lastError, null);
+  assert.deepStrictEqual(stored('unraid_drives').background.rgb, [4, 18, 36, 255]);
+  assert.strictEqual(gaugeColors(stored('unraid_array'))[0], '0,180,230');
+  assert.strictEqual(stored('unraid_array').widgets.find((widget) => widget.id === 'gauge').kind.ranges[0].max, 50);
+  assert.strictEqual(JSON.stringify(stored('unraid_alert_temp').background), red);
+});
+
+test('custom colours and limits are validated', async () => {
+  const colors = { background: [1, 2, 3], text: [4, 5, 6], muted: [7, 8, 9], track: [1, 1, 1], good: [2, 2, 2], warn: [3, 3, 3], bad: [4, 4, 4] };
+  assert.strictEqual((await call('/api/theme', { theme: 'custom' })).status, 400);
+  assert.strictEqual((await call('/api/theme', { customColors: { ...colors, bad: [999, 0, 0] } })).status, 400);
+  assert.strictEqual((await call('/api/theme', { limits: { ...store.data.limits, tempWarn: 60, tempDanger: 50 } })).status, 400);
+  assert.strictEqual((await call('/api/theme', { theme: 'custom', customColors: colors })).status, 200);
+  assert.deepStrictEqual(stored('unraid_drives').background.rgb, [1, 2, 3, 255]);
+  const preview = await call(`/api/preview?id=unraid_drives&colors=${encodeURIComponent(JSON.stringify(colors))}`);
+  assert.strictEqual(preview.status, 200);
+  assert.strictEqual((await call('/api/preview?id=unraid_drives&colors=nope')).status, 400);
+});
+
+test('one LCD can use its own theme without changing the others', async () => {
+  await call('/api/screen', { device_id: LCD1, screen: { kind: 'template', templateId: 'unraid_drives' } });
+  await call('/api/screen', { device_id: 'usb:1-3', screen: { kind: 'template', templateId: 'unraid_drives' } });
+  assert.strictEqual((await call('/api/lcd', { device_id: LCD1, theme: 'ember' })).status, 200);
+  assert.strictEqual(entryFor(LCD1).template_id, 'unraid_drives__ember');
+  assert.strictEqual(entryFor('usb:1-3').template_id, 'unraid_drives');
+  assert.deepStrictEqual(stored('unraid_drives__ember').background.rgb, [20, 8, 4, 255]);
+  assert.strictEqual((await call('/api/lcd', { device_id: LCD1, theme: 'nope' })).status, 400);
+  assert.strictEqual((await call('/api/lcd', { device_id: LCD1, theme: null })).status, 200);
+  assert.strictEqual(entryFor(LCD1).template_id, 'unraid_drives');
+});
+
+test('fan curves follow listed sensors only and never take a command from the API', async () => {
+  const state = await (await call('/api/state')).json();
+  assert.ok(!state.sensors.some((sensor) => sensor.name.includes('command')));
+  assert.ok(state.sensors.some((sensor) => sensor.id === 'unraid:disk_temp_max'));
+  const points = [[30, 25], [50, 100]];
+  assert.strictEqual((await call('/api/curve', { name: 'Drives', sensor: 'unraid:disk_temp_max', points })).status, 200);
+  const curve = mock.state.config.fan_curves.find((item) => item.name === 'Drives');
+  assert.strictEqual(curve.temp_command, 'cat /run/lianli-stats/disk_temp_max');
+  assert.deepStrictEqual(curve.temp_source, { type: 'command', cmd: curve.temp_command });
+
+  const attacks = [
+    { name: 'Bad', sensor: JSON.stringify({ type: 'command', cmd: 'rm -rf /' }), points },
+    { name: 'Bad', sensor: 'unraid:disk_temp_max;reboot', points },
+    { name: 'Bad', sensor: 'unraid:disk_temp_max', points, temp_command: 'rm -rf /', temp_source: { type: 'command', cmd: 'rm -rf /' } },
+  ];
+  assert.strictEqual((await call('/api/curve', attacks[0])).status, 400);
+  assert.strictEqual((await call('/api/curve', attacks[1])).status, 400);
+  await call('/api/curve', attacks[2]);
+  for (const item of mock.state.config.fan_curves) assert.ok(!String(item.temp_command).includes('rm -rf'));
+});
+
+test('curve points are checked: rising, in range, and fans cannot stop', async () => {
+  const send = (points, name = 'New') => call('/api/curve', { name, sensor: 'unraid:disk_temp_max', points });
+  assert.strictEqual((await send([[50, 50], [30, 60]])).status, 400);
+  assert.strictEqual((await send([[30, 0], [50, 60]])).status, 400);
+  assert.strictEqual((await send([[30, 50]])).status, 400);
+  assert.strictEqual((await send([[30, 50], [50, 60]], 'off')).status, 400);
+  assert.strictEqual((await send([[30, 50], [50, 60]], 'Quiet')).status, 200, 'editing overwrites by name');
+  assert.strictEqual(mock.state.config.fan_curves.length, 1);
+});
+
+test('renaming a curve moves the fans using it, and a curve in use cannot be deleted', async () => {
+  await call('/api/fan', { device_id: FAN, mode: 'curve', curve: 'Quiet' });
+  assert.strictEqual((await call('/api/curve/delete', { name: 'Quiet' })).status, 400);
+  const body = { original: 'Quiet', name: 'Silent', sensor: 'unraid:disk_temp_max', points: [[30, 30], [50, 60]] };
+  assert.strictEqual((await call('/api/curve', body)).status, 200);
+  assert.strictEqual(mock.state.config.fans.speeds[0].speeds[0], 'Silent');
+  await call('/api/fan', { device_id: FAN, mode: 'constant', percent: 50 });
+  assert.strictEqual((await call('/api/curve/delete', { name: 'Silent' })).status, 200);
+  assert.strictEqual(mock.state.config.fan_curves.length, 0);
+});
+
+test('lighting takes several colours, speed and direction', async () => {
+  const body = { device_id: FAN, mode: 'Meteor', colors: [[1, 1, 1], [2, 2, 2]], brightness: 3, speed: 4, direction: 'CounterClockwise' };
+  assert.strictEqual((await call('/api/rgb', body)).status, 200);
+  const effect = mock.state.config.rgb.devices[0].zones[0].effect;
+  assert.deepStrictEqual(effect.colors, body.colors);
+  assert.strictEqual(effect.speed, 4);
+  assert.strictEqual(effect.direction, 'CounterClockwise');
+  assert.strictEqual((await call('/api/rgb', { ...body, speed: 9 })).status, 400);
+  assert.strictEqual((await call('/api/rgb', { ...body, direction: 'Sideways' })).status, 400);
+  assert.strictEqual((await call('/api/rgb', { ...body, colors: Array(5).fill([1, 1, 1]) })).status, 400);
+});
+
+test('a lights-off schedule restores the lighting afterwards', async () => {
+  await call('/api/rgb', { device_id: FAN, mode: 'Static', color: [9, 9, 9], brightness: 4 });
+  const schedule = { name: 'Night', start: '11:00', end: '13:00', days: [], brightness: 50, templateId: null, lightsOff: true, enabled: true };
+  assert.strictEqual((await call('/api/schedules', { schedules: [schedule] })).status, 200);
+  assert.strictEqual(engine.lastError, null);
+  const zones = () => mock.state.config.rgb.devices.find((item) => item.device_id === FAN).zones;
+  assert.strictEqual(zones()[0].effect.mode, 'Off');
+  assert.deepStrictEqual(zones()[0].effect.colors, [[9, 9, 9]]);
+  assert.ok(mock.state.config.rgb.devices.length === 3, 'every paired group goes dark');
+  assert.strictEqual((await call('/api/rgb', { device_id: FAN, mode: 'Static', color: [1, 1, 1], brightness: 4 })).status, 400);
+  clock = new Date(2026, 10, 3, 14, 0);
+  await engine.tick();
+  assert.strictEqual(zones()[0].effect.mode, 'Static');
+  assert.strictEqual(mock.state.config.rgb.devices.length, 1);
+  assert.strictEqual(store.data.lightsSnapshot, null);
+});
+
+test('saved setups can be made, used and removed, with safe names', async () => {
+  assert.strictEqual((await call('/api/profile', { action: 'save', name: 'Desk', device_id: FAN })).status, 200);
+  const state = await (await call('/api/state')).json();
+  assert.deepStrictEqual(state.profiles, [{ name: 'Desk', deviceId: FAN }]);
+  assert.strictEqual((await call('/api/profile', { action: 'apply', name: 'Desk', device_id: FAN })).status, 200);
+  assert.strictEqual(mock.state.applied.name, 'Desk');
+  for (const name of ['../../etc/passwd', '..', 'a/b', '']) {
+    assert.strictEqual((await call('/api/profile', { action: 'save', name, device_id: FAN })).status, 400, name);
+  }
+  assert.strictEqual((await call('/api/profile', { action: 'delete', name: 'Desk' })).status, 200);
+  assert.strictEqual(mock.state.profiles.length, 0);
+});
+
+test('devices can be paired, identified and renamed', async () => {
+  const fan = mock.state.fans[1];
+  fan.is_unbound_wireless = true;
+  assert.strictEqual((await call('/api/device', { device_id: fan.device_id, action: 'bind' })).status, 200);
+  assert.deepStrictEqual(mock.state.binds, [['BindWirelessDevice', 'f6:0b:07:f5:11']]);
+
+  mock.state.bindResult = { status: 'failed', message: 'No answer' };
+  const failed = await call('/api/device', { device_id: fan.device_id, action: 'bind' });
+  assert.strictEqual(failed.status, 502);
+  assert.strictEqual((await failed.json()).error, 'No answer');
+
+  fan.foreign_master_online = true;
+  assert.strictEqual((await call('/api/device', { device_id: fan.device_id, action: 'bind' })).status, 400);
+  assert.strictEqual((await call('/api/device', { device_id: LCD1, action: 'bind' })).status, 400);
+
+  assert.strictEqual((await call('/api/device', { device_id: FAN, action: 'identify' })).status, 200);
+  assert.deepStrictEqual(mock.state.pings, [{ device_id: FAN, zone: 0 }]);
+
+  assert.strictEqual((await call('/api/device', { device_id: FAN, action: 'rename', name: 'Top' })).status, 200);
+  let state = await (await call('/api/state')).json();
+  assert.strictEqual(state.devices.find((item) => item.id === FAN).name, 'Top');
+  await call('/api/device', { device_id: FAN, action: 'rename', name: '' });
+  state = await (await call('/api/state')).json();
+  assert.notStrictEqual(state.devices.find((item) => item.id === FAN).name, 'Top');
+});
+
+test('a screen can be a solid colour, dimmed and rotated', async () => {
+  assert.strictEqual((await call('/api/screen', { device_id: LCD1, screen: { kind: 'color', rgb: [5, 6, 7] } })).status, 200);
+  assert.strictEqual(entryFor(LCD1).type, 'color');
+  assert.deepStrictEqual(entryFor(LCD1).rgb, [5, 6, 7]);
+  assert.strictEqual((await call('/api/lcd', { device_id: LCD1, brightness: 40 })).status, 200);
+  assert.strictEqual(mock.state.brightness[LCD1], 40);
+  assert.strictEqual(entryFor(LCD1).brightness, 40);
+  assert.strictEqual((await call('/api/lcd', { device_id: LCD1, orientation: 180 })).status, 200);
+  assert.strictEqual(entryFor(LCD1).orientation, 180);
+  assert.strictEqual((await call('/api/lcd', { device_id: LCD1, orientation: 45 })).status, 400);
+  assert.strictEqual((await call('/api/lcd', { device_id: LCD1, brightness: 500 })).status, 400);
+  assert.strictEqual((await call('/api/lcd', { device_id: FAN, brightness: 40 })).status, 400);
+});
+
+test('brightness changed during a schedule is what comes back after it', async () => {
+  mock.state.config.lcds.push({ serial: LCD1, type: 'color', rgb: [1, 2, 3], path: null, fps: null, orientation: 0, brightness: 80 });
+  await call('/api/schedules', { schedules: [{ name: 'Night', start: '11:00', end: '13:00', days: [], brightness: 10, templateId: null, enabled: true }] });
+  assert.strictEqual(mock.state.brightness[LCD1], 10);
+  await call('/api/lcd', { device_id: LCD1, brightness: 70 });
+  assert.strictEqual(mock.state.brightness[LCD1], 10);
+  clock = new Date(2026, 10, 3, 14, 0);
+  await engine.tick();
+  assert.strictEqual(mock.state.brightness[LCD1], 70);
+});
+
+test('pixel cleaning waits for the daemon to prepare, and can stop', async () => {
+  mock.state.pixel.needsPreparation = true;
+  assert.strictEqual((await call('/api/pixel', { action: 'start', minutes: 45 })).status, 400);
+  assert.strictEqual((await call('/api/pixel', { action: 'start', minutes: 30 })).status, 200);
+  assert.strictEqual(mock.state.pixel.active, true);
+  assert.strictEqual((await call('/api/pixel', { action: 'stop' })).status, 200);
+  assert.strictEqual(mock.state.pixel.active, false);
+});
+
+test('uploads stay in their folder, need a media type and can be deleted', async () => {
+  const send = (name, content = 'data', headers = { 'X-Lianli-Dashboard': '1' }) => fetch(`${base}/api/upload?name=${encodeURIComponent(name)}`, { method: 'POST', headers, body: content });
+  assert.strictEqual((await send('run.sh')).status, 400);
+  assert.strictEqual((await send('.png')).status, 400);
+  assert.strictEqual((await send('cat.png', 'x', {})).status, 403);
+
+  const response = await send('../../evil name.png');
+  assert.strictEqual(response.status, 200);
+  const { path: saved } = await response.json();
+  const uploads = path.join(dir, 'uploads').split(path.sep).join('/');
+  assert.strictEqual(saved, `${uploads}/evil_name.png`);
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'uploads')), ['evil_name.png']);
+
+  const big = await send('big.mp4', Buffer.alloc(200 * 1024));
+  assert.strictEqual(big.status, 200, 'uploads are not held to the JSON size limit');
+
+  assert.strictEqual((await call('/api/screen', { device_id: LCD1, screen: { kind: 'media', path: saved } })).status, 200);
+  assert.strictEqual(entryFor(LCD1).path, saved);
+  assert.strictEqual((await call('/api/media/delete', { path: saved })).status, 400, 'in use');
+  await call('/api/screen', { device_id: LCD1, screen: { kind: 'keep' } });
+  assert.strictEqual((await call('/api/media/delete', { path: saved })).status, 200);
+  assert.ok(!fs.existsSync(saved));
+
+  const outside = path.join(dir, 'media', 'logo.png').split(path.sep).join('/');
+  assert.strictEqual((await call('/api/media/delete', { path: outside })).status, 400);
+  assert.ok(fs.existsSync(outside));
+  assert.strictEqual((await call('/api/media/delete', { path: `${uploads}/../media/logo.png` })).status, 400);
+});
+
+test('settings change only what was asked and keep the rest of the config', async () => {
+  mock.state.config.default_fps = 24;
+  assert.strictEqual((await call('/api/settings', { turnOffLcds: false, defaultFps: 30 })).status, 200);
+  assert.strictEqual(mock.state.config.turn_off_lcds_on_shutdown, false);
+  assert.strictEqual(mock.state.config.default_fps, 30);
+  assert.strictEqual(mock.state.config.fan_curves.length, 1);
+  assert.strictEqual((await call('/api/settings', { defaultFps: 500 })).status, 400);
+  assert.strictEqual(mock.state.config.default_fps, 30);
+});
+
+test('the storage alert watches the fullest pool, whichever one the screens show', async () => {
+  store.data.alerts.enabled = true;
+  store.data.alerts.diskTempC = 70;
+  store.data.storageVolume = 'cache';
+  assert.strictEqual(engine.alert(), null);
+  store.data.alerts.storagePct = 75;
+  assert.strictEqual(engine.alert(), 'storage');
+  store.data.alerts.storageFull = false;
+  assert.strictEqual(engine.alert(), null);
+  const alert = buildTemplates('/run/lianli-stats').find((item) => item.id === 'unraid_alert_storage');
+  assert.ok(alert);
+});
+
+test('history keeps a day of samples and survives a restart', () => {
+  const file = path.join(dir, 'history.json');
+  const history = new History(file);
+  for (let index = 0; index < 1500; index += 1) history.add({ t: index, temp: 30 });
+  assert.strictEqual(history.points.length, 1440);
+  assert.strictEqual(history.points[0].t, 60);
+  history.save();
+  assert.strictEqual(new History(file).points.length, 1440);
+  fs.writeFileSync(file, 'not json');
+  assert.deepStrictEqual(new History(file).points, []);
+});
+
+test('the page assets, health report and backup are served, nothing else from disk', async () => {
+  assert.match(await (await call('/')).text(), /app\.js/);
+  assert.match((await call('/app.js')).headers.get('content-type'), /javascript/);
+  assert.match((await call('/style.css')).headers.get('content-type'), /css/);
+  assert.strictEqual((await call('/server.js')).status, 404);
+  assert.strictEqual((await call('/../server.js')).status, 404);
+  assert.strictEqual((await (await call('/api/health')).json()).findings[0].title, 'Example');
+  const backup = await call('/api/export');
+  assert.match(backup.headers.get('content-disposition'), /attachment/);
+  const parsed = await backup.json();
+  assert.ok(parsed.daemonConfig.fan_curves && parsed.dashboard.schedules);
+});
+
+test('settings saved by the previous version still load with new defaults', () => {
+  const file = path.join(dir, 'old.json');
+  fs.writeFileSync(file, JSON.stringify({ storageVolume: 'hulk', alerts: { enabled: true, diskTempC: 45, diskProblem: true, parityErrors: true, muteUntil: 0 } }));
+  const old = new Store(file);
+  assert.strictEqual(old.data.storageVolume, 'hulk');
+  assert.strictEqual(old.data.alerts.diskTempC, 45);
+  assert.strictEqual(old.data.alerts.storagePct, 90);
+  assert.strictEqual(old.data.theme, 'default');
+  assert.deepStrictEqual(old.data.names, {});
 });
 
 test('password protection applies to everything when set', async () => {

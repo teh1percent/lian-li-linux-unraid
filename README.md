@@ -90,15 +90,26 @@ Open `http://<server>:6090` on a phone or computer.
 - **Status:** hottest drive, storage per pool and array, fan speeds, and parity
   state if you have a classic array. The **Storage** picker chooses whether the
   page and the Storage and Overview LCD screens show all storage or one pool.
-- **Fans:** fixed speed (20% minimum here) or any curve made in the full app.
-- **Lights:** effect, colour and brightness per fan group, or all at once.
-- **Screens:** choose what each LCD shows: an Unraid screen or a file from the
-  LCD media folder. Each pool also has its own screen, so different fans can show
-  different pools, and new pools get one automatically. **Different stat on each
-  fan** assigns them in turn.
-- **Automation:** schedules (screen brightness, optional screen swap) and alerts
-  that take over every screen for a hot drive, a disk problem or parity errors.
-  Muting lasts 24 hours. Schedules don't change fan speeds.
+  Charts show the last 24 hours of drive temperature, storage and fan speed.
+- **Fans:** fixed speed or a fan curve, per group or on all groups. Curves can be
+  created here and can follow the hottest drive, the average drive temperature,
+  the hottest drive in one pool, or a hardware temperature sensor. Speeds stop at
+  20% here, so fans can't be stopped by accident.
+- **Lights:** effect, colours, brightness, speed and direction per fan group, or
+  all at once. **Saved setups** store a group's settings under a name.
+- **Screens:** what each LCD shows (an Unraid screen, your own file or a solid
+  colour), brightness, rotation and colours. Each pool has its own screen, and new
+  pools get one automatically. **Screen colours** offers themes or custom colours
+  and sets when gauges change colour. Upload files here, and start pixel cleaning.
+- **Auto:** schedules (brightness, optional screen swap, optional lights off) and
+  alerts that take over every screen for a hot drive, a disk problem, parity errors
+  or a nearly full pool. Muting lasts 24 hours. Schedules don't change fan speeds.
+- **System:** pair, unpair, identify and rename devices, general settings,
+  Installation Health, and a settings download.
+
+Not offered here: the template editor, AIO pages, OpenRGB, desktop mode and startup
+images. They stay in the full app. The settings download is for keeping a copy;
+there's no restore button.
 
 An LCD left on **Set in the full app** is only touched while an alert or a
 screen-swapping schedule is active, and is restored afterwards. An LCD given a
@@ -110,10 +121,15 @@ Alerts use Unraid's per-disk status, so ZFS pool health and scrub results aren't
 included.
 
 The API only offers fixed operations with validated values. It can't set sensor
-commands, because the daemon runs those as shell. It still controls cooling, so
-set `WEB_PASSWORD` unless you trust everyone on the network.
+commands, because the daemon runs those as shell: fan curves can only follow the
+listed sensors. It still controls cooling and accepts file uploads, so set
+`WEB_PASSWORD` unless you trust everyone on the network.
 
-Settings are stored in `extras/settings.json` in AppData. The current values are
+A fan group that reads **0 RPM** is reporting 0 itself, over the radio. Check that
+its fans have power and are plugged into the controller.
+
+Settings are stored in `extras/settings.json` in AppData, chart data in
+`extras/history.json` and uploads in `extras/media`. The current values are
 files in `/run/lianli-stats` inside the container. You can use them in your own
 templates and fan curves, for example with the sensor command
 `cat /run/lianli-stats/disk_temp_max`.
