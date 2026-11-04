@@ -44,6 +44,14 @@ let shownTabs = '';
 // Extra reasons to hold off redrawing a page, added by the page scripts.
 const holds = [];
 
+// A session can end at any time, and every request should lead back to the sign-in page.
+const plainFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const response = await plainFetch(...args);
+  if (response.status === 401) window.location.replace('/login');
+  return response;
+};
+
 const aioDevices = () => (data ? data.devices.filter((device) => device.isAio && !device.unbound && !device.hidden) : []);
 
 const view = document.getElementById('view');
@@ -722,7 +730,7 @@ function renderSystem() {
   html += `<div class="card"><div class="card-head"><h2>Backup</h2></div><p class="muted" style="margin:0 0 12px">Downloads the fan, lighting and screen settings plus this dashboard's settings as a JSON file.</p>
     <a class="btn" href="/api/export" download>Download settings</a></div>`;
   html += backupsCard();
-  html += `</div><div>${healthCard()}${diagnosticsCard()}${updateCard()}${aboutCard()}</div></div>`;
+  html += `</div><div>${healthCard()}${passwordCard()}${diagnosticsCard()}${updateCard()}${aboutCard()}</div></div>`;
   view.innerHTML = html;
 }
 

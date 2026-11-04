@@ -24,8 +24,9 @@ rootfs/usr/local/bin/
   sync-devices.sh                mirrors /dev/bus/usb and /dev/hidraw* from sysfs (udev stand-in)
 rootfs/opt/lianli-extras/        dashboard, Unraid stats and LCD automation (Node, no dependencies)
 rootfs/etc/supervisor/supervisord.conf
-tests/                           tests against a mock daemon: node --test tests/extras.test.js
-unraid/lian-li-linux.xml         Unraid Docker template
+tests/                           mock daemon tests and template checks: node --test tests/*.test.js
+templates/lian-li-linux.xml      Unraid Docker template
+ca_profile.xml, icon.*, LICENSE  Community Applications repository files
 .github/workflows/docker.yml     builds and pushes to ghcr.io
 ```
 
@@ -50,16 +51,19 @@ or run the workflow manually with the version as input.
 
 ## Install on Unraid
 
+If the app is listed in Community Applications, open the **Apps** tab, search for
+`lian-li-linux` and click **Install**. To install it by hand instead:
+
 1. Download the template onto the flash drive, from Unraid's terminal:
 
    ```bash
-   wget -O /boot/config/plugins/dockerMan/templates-user/my-lian-li-linux.xml https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/unraid/lian-li-linux.xml
+   wget -O /boot/config/plugins/dockerMan/templates-user/my-lian-li-linux.xml https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/templates/lian-li-linux.xml
    ```
 
    Or, from a copy of this repo on the server:
 
    ```bash
-   cp unraid/lian-li-linux.xml /boot/config/plugins/dockerMan/templates-user/my-lian-li-linux.xml
+   cp templates/lian-li-linux.xml /boot/config/plugins/dockerMan/templates-user/my-lian-li-linux.xml
    ```
 
 2. **Docker → Add Container →** choose `lian-li-linux` from the Template dropdown → **Apply**.
@@ -73,7 +77,7 @@ The template defaults to:
 | AppData | `/var/lib/lianli` | `/mnt/user/appdata/lian-li-linux` |
 | LCD media (read-only) | `/media/lianli` | `/mnt/user/appdata/lian-li-linux/media` |
 | Unraid state (read-only) | `/host/emhttp` | `/var/local/emhttp` |
-| `WEB_PASSWORD` | | empty (no password) |
+| `RESET_PASSWORD` | | `no` |
 | `PUID` / `PGID` | | `99` / `100` |
 | OpenRGB (optional) | `6743/tcp` | not published |
 | `LOG_LEVEL` | | `info` |
@@ -83,7 +87,18 @@ need the host's hwmon temperature sensors under `/sys`.
 
 ## Dashboard and Unraid features
 
-Open `http://<server>:6090` on a phone or computer.
+Open `http://<server>:6090` on a phone or computer. The first visit asks you to
+create a password, so do that right after installing: until then, the first person
+to open the page can choose it. Only a salted hash is stored, in `extras/auth.json`
+in AppData, and browsers stay signed in for 30 days. Change the password or sign out
+on the **System** page.
+
+**Forgot the password?** Edit the container, click **Show more settings**, set
+**Reset dashboard password** (`RESET_PASSWORD`) to `yes` and click **Apply**. The
+password is cleared once and the dashboard asks for a new one. Fan curves, lighting
+and screens aren't affected. Set it back to `no` afterwards. Leaving it on `yes`
+doesn't clear the new password on restart, but it has to go back to `no` before it
+can reset again.
 
 - **Status:** hottest drive, storage per pool and array, fan speeds, and parity
   state if you have a classic array. The **Storage** picker chooses whether the
@@ -136,8 +151,10 @@ included.
 
 The API only offers fixed operations with validated values. It can't set sensor
 commands, because the daemon runs those as shell: curves, gauges and designs can only
-use the listed sensors. Screen files must be in the media or upload folders. It still controls cooling and accepts file uploads, so set
-`WEB_PASSWORD` unless you trust everyone on the network.
+use the listed sensors. Screen files must be in the media or upload folders. Five wrong passwords from one
+address block sign-in for a minute. The dashboard uses plain HTTP, so the password
+isn't encrypted on the network: keep it on a trusted LAN or behind a VPN or an HTTPS
+reverse proxy, and don't port-forward it to the internet.
 
 A fan group that reads **0 RPM** is reporting 0 itself, over the radio. Check that
 its fans have power and are plugged into the controller.
@@ -180,15 +197,22 @@ The entrypoint also does what the distro packaging normally handles:
 
 ## Limitations
 
-- **Desktop mode** (using a HydroShift II, Lancool 207 or Universal Screen LCD as a
-  monitor) can't work here. It needs a graphical login and kernel modules on the
-  host. A screen left in that mode gets a **Return to LCD mode** button.
+- **Desktop mode** (using an LCD as a monitor) isn't available. Upstream only supports
+  it on the HydroShift II, Lancool 207, Universal Screen 8.8" and Vision 9.2", not on
+  LCD fans, and it needs a graphical login that this container doesn't have. A screen
+  left in that mode gets a **Return to LCD mode** button.
 - **Service controls** from the desktop app (systemd and pkexec) aren't offered, because
   supervisord keeps the daemon running. **Installation Health** may flag systemd/udev items.
 - The dashboard's upload replaces the desktop app's "import media" step.
 - The image still installs the libraries the upstream package depends on, so it's
   smaller than before but not as small as it could be.
 - amd64 only (upstream ships amd64 packages only).
+
+## Support
+
+Report problems with this package at
+[this repo's issues](https://github.com/teh1percent/lian-li-linux-unraid/issues),
+not on the upstream project.
 
 ## Troubleshooting
 

@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<CommunityApplications>
+  <Profile>
+    Unraid packaging of Lian Li Linux, the open-source replacement for L-Connect 3 by sgtaziz, with a web dashboard and Unraid stats for Lian Li LCD screens.
+
+    For help with this package, open an issue at https://github.com/teh1percent/lian-li-linux-unraid/issues
+
+    Not affiliated with Lian Li Industrial Co., Ltd.
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/icon.svg</Icon>
+  <WebPage>https://github.com/teh1percent/lian-li-linux-unraid</WebPage>
+</CommunityApplications>

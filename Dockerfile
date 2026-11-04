@@ -38,7 +38,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/*.sh /etc/supervisor/supervisord.conf \
 ENV PUID=99 \
     PGID=100 \
     LOG_LEVEL=info \
-    WEB_PASSWORD=
+    RESET_PASSWORD=no
 
 VOLUME ["/var/lib/lianli"]
 EXPOSE 6090

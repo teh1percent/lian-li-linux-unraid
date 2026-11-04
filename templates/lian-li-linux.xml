@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>lian-li-linux</Name>
+  <Repository>ghcr.io/teh1percent/lian-li-linux-unraid:latest</Repository>
+  <Registry>https://github.com/teh1percent/lian-li-linux-unraid/pkgs/container/lian-li-linux-unraid</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>true</Privileged>
+  <Support>https://github.com/teh1percent/lian-li-linux-unraid/issues</Support>
+  <Project>https://github.com/teh1percent/lian-li-linux-unraid</Project>
+  <ReadMe>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/README.md</ReadMe>
+  <Overview>Control Lian Li fans, AIOs, Strimers, LCD screens and wireless dongles from Unraid, without L-Connect 3. Includes fan curves, RGB effects, LCD images and video, and a phone-friendly dashboard with Unraid stats for your LCD fans, a screen designer, schedules and alerts.
+
+Unraid packaging of Lian Li Linux by sgtaziz (https://github.com/sgtaziz/lian-li-linux). Please report problems with this package to its own issue tracker, not to the upstream project. Tested in this container with UNI FAN TL V3 Wireless LCD fans. Other devices use the same upstream daemon but may not have been tried on Unraid yet.
+
+Privileged mode is required for USB/HID access and hwmon temperature sensors. Run only one copy, because the daemon must be the only program controlling the Lian Li hardware. The dashboard asks you to create a password the first time you open it, so open it right after installing. It uses plain HTTP, so keep it on a trusted network.
+
+Not affiliated with Lian Li Industrial Co., Ltd.</Overview>
+  <Category>Tools:System</Category>
+  <WebUI>http://[IP]:[PORT:6090]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/templates/lian-li-linux.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/icon.png</Icon>
+  <ExtraSearchTerms>lianli lian-li l-connect fan fans rgb lcd aio strimer hydroshift uni-fan</ExtraSearchTerms>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Lian Li USB devices (controller, AIO, LCD, or TX/RX dongles) connected to the Unraid server. amd64 only.</Requires>
+  <Date>2026-11-04</Date>
+  <Changes>Initial Community Applications release, based on Lian Li Linux 1.2.4.</Changes>
+  <License>MIT</License>
+  <Config Name="Dashboard port" Target="6090" Default="6090" Mode="tcp" Description="Phone-friendly web dashboard: status, fans, lighting, LCD screens, schedules, alerts and settings." Type="Port" Display="always" Required="true" Mask="false">6090</Config>
+  <Config Name="Unraid state" Target="/host/emhttp" Default="/var/local/emhttp" Mode="ro" Description="Unraid's array status files, used for drive temperatures, array usage and parity state. Read without waking sleeping drives." Type="Path" Display="always" Required="true" Mask="false">/var/local/emhttp</Config>
+  <Config Name="AppData" Target="/var/lib/lianli" Default="/mnt/user/appdata/lian-li-linux" Mode="rw" Description="Daemon configuration, fan curves, profiles, templates and managed LCD assets." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/lian-li-linux</Config>
+  <Config Name="LCD media" Target="/media/lianli" Default="/mnt/user/appdata/lian-li-linux/media" Mode="ro" Description="Images and videos to pick from on the dashboard's Screens page. You can also upload files on that page." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/lian-li-linux/media</Config>
+  <Config Name="Reset dashboard password" Target="RESET_PASSWORD" Default="no|yes" Mode="" Description="Forgot the password? Set to yes and click Apply. The password is cleared once and the dashboard asks for a new one. Set it back to no afterwards." Type="Variable" Display="advanced" Required="false" Mask="false">no</Config>
+  <Config Name="OpenRGB port" Target="6743" Default="" Mode="tcp" Description="Only needed to control the lights from OpenRGB on another computer. Turn the server on in the dashboard's Lights page first. It has no password." Type="Port" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Log level" Target="LOG_LEVEL" Default="info" Mode="" Description="Daemon log level: error, warn, info, debug, trace." Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="UID the daemon and dashboard run as (owner of AppData)." Type="Variable" Display="advanced" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="GID the daemon and dashboard run as." Type="Variable" Display="advanced" Required="true" Mask="false">100</Config>
+</Container>

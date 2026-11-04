@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lian Li Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b7cfa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Cpath d='M12 10c0-4 1-7 4-7s3 5-2 8M14 12c4 0 7 1 7 4s-5 3-8-2M12 14c0 4-1 7-4 7s-3-5 2-8M10 12c-4 0-7-1-7-4s5-3 8 2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="login-page">
+<main>
+  <form class="card" id="form" hidden>
+    <h1 id="title"></h1>
+    <p class="muted" id="intro"></p>
+    <label>Password<input type="password" id="password" required maxlength="256"></label>
+    <label id="confirmRow" hidden>Confirm password<input type="password" id="confirm" maxlength="256" autocomplete="new-password"></label>
+    <p class="bad" id="error" role="alert" hidden></p>
+    <div class="actions"><button class="btn primary" id="submit"></button></div>
+    <p class="muted" id="help"></p>
+  </form>
+</main>
+<script src="/login.js"></script>
+</body>
+</html>

@@ -7,6 +7,7 @@ const path = require('node:path');
 const { test, beforeEach, afterEach } = require('node:test');
 
 const extras = path.join(__dirname, '..', 'rootfs', 'opt', 'lianli-extras');
+const { Auth } = require(path.join(extras, 'lib', 'auth'));
 const { DaemonClient } = require(path.join(extras, 'lib', 'daemon'));
 const { Engine, Store, scheduleActive } = require(path.join(extras, 'lib', 'engine'));
 const { History } = require(path.join(extras, 'lib', 'history'));
@@ -19,13 +20,14 @@ const fixtures = path.join(__dirname, 'fixtures');
 const disksIni = fs.readFileSync(path.join(fixtures, 'disks.ini'), 'utf8');
 const varIni = fs.readFileSync(path.join(fixtures, 'var.ini'), 'utf8');
 
-let dir, mock, socketPath, stats, clock, store, engine, http, base;
+let dir, mock, socketPath, stats, clock, store, engine, http, base, auth, session;
 
 function listen(server, target) {
   return new Promise((resolve) => server.listen(target, resolve));
 }
 
-function call(url, body, headers = { 'X-Lianli-Dashboard': '1' }) {
+function call(url, body, extraHeaders = { 'X-Lianli-Dashboard': '1' }) {
+  const headers = { Cookie: session, ...extraHeaders };
   return fetch(`${base}${url}`, body === undefined ? { headers } : { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
@@ -43,7 +45,10 @@ beforeEach(async () => {
   fs.mkdirSync(media);
   fs.writeFileSync(path.join(media, 'logo.png'), 'x');
   fs.writeFileSync(path.join(media, 'notes.txt'), 'x');
-  http = createApp({ daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: media, uploadDir: path.join(dir, 'uploads'), password: '' } });
+  auth = new Auth(path.join(dir, 'auth.json'));
+  await auth.setup('test password');
+  session = `lianli_session=${auth.session()}`;
+  http = createApp({ daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: media, uploadDir: path.join(dir, 'uploads') }, auth });
   await listen(http, 0);
   base = `http://127.0.0.1:${http.address().port}`;
 });
@@ -540,7 +545,7 @@ test('pixel cleaning waits for the daemon to prepare, and can stop', async () =>
 });
 
 test('uploads stay in their folder, need a media type and can be deleted', async () => {
-  const send = (name, content = 'data', headers = { 'X-Lianli-Dashboard': '1' }) => fetch(`${base}/api/upload?name=${encodeURIComponent(name)}`, { method: 'POST', headers, body: content });
+  const send = (name, content = 'data', headers = { 'X-Lianli-Dashboard': '1' }) => fetch(`${base}/api/upload?name=${encodeURIComponent(name)}`, { method: 'POST', headers: { Cookie: session, ...headers }, body: content });
   assert.strictEqual((await send('run.sh')).status, 400);
   assert.strictEqual((await send('.png')).status, 400);
   assert.strictEqual((await send('cat.png', 'x', {})).status, 403);
@@ -782,20 +787,117 @@ test('the coolant alert takes over the screens, and its limit can be saved', asy
   assert.strictEqual(store.data.alerts.coolantHot, true, 'pages without the switch leave it alone');
 });
 
-test('password protection applies to everything when set', async () => {
-  const locked = createApp({ daemon: engine.daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: dir, password: 'secret' } });
-  await listen(locked, 0);
-  const url = `http://127.0.0.1:${locked.address().port}`;
+// A second app with its own password file, for the sign-in tests.
+async function withFreshAuth(run) {
+  const file = path.join(dir, 'fresh-auth.json');
+  const fresh = new Auth(file, () => clock.getTime());
+  const app = createApp({ daemon: engine.daemon, engine, store, options: { statsDir: '/run/lianli-stats', mediaDir: dir, uploadDir: path.join(dir, 'uploads') }, auth: fresh });
+  await listen(app, 0);
+  const url = `http://127.0.0.1:${app.address().port}`;
+  const post = (route, body, cookie = '') => fetch(`${url}${route}`, { method: 'POST', headers: { 'X-Lianli-Dashboard': '1', Cookie: cookie }, body: JSON.stringify(body) });
+  const cookieOf = (response) => response.headers.get('set-cookie').split(';')[0];
   try {
-    assert.strictEqual((await fetch(`${url}/`)).status, 401);
-    assert.strictEqual((await fetch(`${url}/api/state`)).status, 401);
-    const wrong = `Basic ${Buffer.from('x:nope').toString('base64')}`;
-    assert.strictEqual((await fetch(`${url}/`, { headers: { Authorization: wrong } })).status, 401);
-    const right = `Basic ${Buffer.from('x:secret').toString('base64')}`;
-    assert.strictEqual((await fetch(`${url}/`, { headers: { Authorization: right } })).status, 200);
+    await run({ url, post, cookieOf, fresh, file });
   } finally {
-    await new Promise((resolve) => locked.close(resolve));
+    await new Promise((resolve) => app.close(resolve));
   }
+}
+
+test('everything but the sign-in page is locked, even before a password exists', async () => {
+  await withFreshAuth(async ({ url, post, cookieOf }) => {
+    const home = await fetch(`${url}/`, { redirect: 'manual' });
+    assert.strictEqual(home.status, 302);
+    assert.strictEqual(home.headers.get('location'), '/login');
+    assert.strictEqual((await fetch(`${url}/login`)).status, 200);
+    assert.strictEqual((await fetch(`${url}/app.js`)).status, 401);
+    assert.strictEqual((await fetch(`${url}/api/state`)).status, 401);
+    assert.strictEqual((await post('/api/storage', { volume: 'all' })).status, 401);
+    assert.deepStrictEqual(await (await fetch(`${url}/api/auth`)).json(), { setup: true, resetOn: false });
+
+    const noHeader = await fetch(`${url}/api/auth/setup`, { method: 'POST', body: JSON.stringify({ password: 'long enough' }) });
+    assert.strictEqual(noHeader.status, 403, 'another website cannot claim the password');
+    assert.strictEqual((await post('/api/auth/setup', { password: 'short' })).status, 400);
+
+    const created = await post('/api/auth/setup', { password: 'long enough' });
+    assert.strictEqual(created.status, 200);
+    assert.match(created.headers.get('set-cookie'), /HttpOnly/);
+    assert.strictEqual((await fetch(`${url}/api/state`, { headers: { Cookie: cookieOf(created) } })).status, 200);
+    assert.strictEqual((await post('/api/auth/setup', { password: 'someone else' })).status, 400, 'setup only works once');
+  });
+});
+
+test('only the stored hash is written and sessions expire', async () => {
+  await withFreshAuth(async ({ url, post, cookieOf, file }) => {
+    const created = await post('/api/auth/setup', { password: 'long enough' });
+    assert.ok(!fs.readFileSync(file, 'utf8').includes('long enough'));
+    const cookie = cookieOf(created);
+    assert.strictEqual((await fetch(`${url}/api/export`, { headers: { Cookie: cookie } })).status, 200);
+    assert.ok(!(await (await fetch(`${url}/api/export`, { headers: { Cookie: cookie } })).text()).includes(JSON.parse(fs.readFileSync(file, 'utf8')).password.hash), 'the settings download has no hash');
+    const forged = `${cookie.split('.')[0]}.${'0'.repeat(64)}`;
+    assert.strictEqual((await fetch(`${url}/api/state`, { headers: { Cookie: forged } })).status, 401);
+    clock = new Date(clock.getTime() + 31 * 24 * 60 * 60 * 1000);
+    assert.strictEqual((await fetch(`${url}/api/state`, { headers: { Cookie: cookie } })).status, 401);
+  });
+});
+
+test('signing in checks the password and limits guessing', async () => {
+  await withFreshAuth(async ({ url, post, cookieOf }) => {
+    await post('/api/auth/setup', { password: 'long enough' });
+    assert.strictEqual((await post('/api/auth/login', { password: 'wrong' })).status, 401);
+    const right = await post('/api/auth/login', { password: 'long enough' });
+    assert.strictEqual(right.status, 200);
+    assert.strictEqual((await fetch(`${url}/api/state`, { headers: { Cookie: cookieOf(right) } })).status, 200);
+
+    for (let i = 0; i < 5; i += 1) assert.strictEqual((await post('/api/auth/login', { password: 'wrong' })).status, 401);
+    assert.strictEqual((await post('/api/auth/login', { password: 'long enough' })).status, 429, 'even the right password waits');
+    clock = new Date(clock.getTime() + 61000);
+    assert.strictEqual((await post('/api/auth/login', { password: 'long enough' })).status, 200);
+  });
+});
+
+test('changing the password needs the current one and signs out other browsers', async () => {
+  await withFreshAuth(async ({ url, post, cookieOf }) => {
+    const old = cookieOf(await post('/api/auth/setup', { password: 'long enough' }));
+    assert.strictEqual((await post('/api/auth/change', { current: 'nope', password: 'brand new one' })).status, 401, 'needs a session');
+    assert.strictEqual((await post('/api/auth/change', { current: 'nope', password: 'brand new one' }, old)).status, 400);
+    const changed = await post('/api/auth/change', { current: 'long enough', password: 'brand new one' }, old);
+    assert.strictEqual(changed.status, 200);
+    assert.strictEqual((await fetch(`${url}/api/state`, { headers: { Cookie: old } })).status, 401);
+    assert.strictEqual((await fetch(`${url}/api/state`, { headers: { Cookie: cookieOf(changed) } })).status, 200);
+    assert.strictEqual((await post('/api/auth/login', { password: 'long enough' })).status, 401);
+  });
+});
+
+test('the reset setting clears the password once per time it is turned on', async () => {
+  const file = path.join(dir, 'reset-auth.json');
+  const boot = (requested) => {
+    const auth = new Auth(file);
+    auth.applyReset(requested);
+    return auth;
+  };
+  const first = boot(false);
+  await first.setup('long enough');
+  assert.strictEqual(boot(false).needsSetup, false);
+
+  const reset = boot(true);
+  assert.strictEqual(reset.needsSetup, true);
+  assert.strictEqual(reset.resetOn, true);
+  await reset.setup('second one here');
+  const restarted = boot(true);
+  assert.strictEqual(restarted.needsSetup, false, 'left on, a restart must not wipe the new password');
+  assert.ok(await restarted.verify('second one here'));
+
+  assert.strictEqual(boot(false).needsSetup, false);
+  assert.strictEqual(boot(true).needsSetup, true, 'turned off and on again, it resets again');
+});
+
+test('a damaged password file stays locked until reset', () => {
+  const file = path.join(dir, 'broken-auth.json');
+  fs.writeFileSync(file, '{not json');
+  const auth = new Auth(file);
+  assert.strictEqual(auth.needsSetup, false);
+  auth.applyReset(true);
+  assert.strictEqual(auth.needsSetup, true);
 });
 
 // Everything the desktop app used to do ----------------------------------------
@@ -930,10 +1032,10 @@ test('catalog templates install only when their checksum matches', async () => {
   const templateSha = sha(body);
   const manifest = () => JSON.stringify({ schema_version: 1, templates: [{ id: 'cat', name: 'Cat', folder: 'cat', template_file: 't.json', template_sha256: templateSha, preview: 'p.png', preview_sha256: sha('png'), base_width: 400, base_height: 400 }] });
   const download = async (url) => Buffer.from(url.endsWith('default_templates.json') ? manifest() : url.endsWith('t.json') ? body : 'png');
-  const options = { statsDir: '/run/lianli-stats', mediaDir: dir, uploadDir: path.join(dir, 'uploads'), password: '', download };
-  const server = createApp({ daemon: engine.daemon, engine, store, options });
+  const options = { statsDir: '/run/lianli-stats', mediaDir: dir, uploadDir: path.join(dir, 'uploads'), download };
+  const server = createApp({ daemon: engine.daemon, engine, store, options, auth });
   await listen(server, 0);
-  const local = async (url, payload) => fetch(`http://127.0.0.1:${server.address().port}${url}`, { method: payload ? 'POST' : 'GET', headers: { 'X-Lianli-Dashboard': '1' }, body: payload && JSON.stringify(payload) });
+  const local = async (url, payload) => fetch(`http://127.0.0.1:${server.address().port}${url}`, { method: payload ? 'POST' : 'GET', headers: { 'X-Lianli-Dashboard': '1', Cookie: session }, body: payload && JSON.stringify(payload) });
   try {
     assert.strictEqual((await (await local('/api/catalog')).json())[0].id, 'cat');
     assert.strictEqual((await local('/api/catalog/preview?id=cat')).headers.get('content-type'), 'image/png');

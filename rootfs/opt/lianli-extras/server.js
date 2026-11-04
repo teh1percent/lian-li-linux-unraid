@@ -9,6 +9,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
+const { Auth, SESSION_MS } = require('./lib/auth');
 const { BadRequest, check, isInt } = require('./lib/check');
 const { DaemonClient } = require('./lib/daemon');
 const { Engine, Store, mediaType, findEntry, ALERT_TEMPLATES } = require('./lib/engine');
@@ -52,6 +53,14 @@ const STATIC_FILES = {
   ...Object.fromEntries(SCRIPTS.map((file) => [`/${file}`, [file, 'text/javascript; charset=utf-8']])),
 };
 
+// The only files served before signing in.
+const PUBLIC_FILES = {
+  '/style.css': STATIC_FILES['/style.css'],
+  '/login.js': ['login.js', 'text/javascript; charset=utf-8'],
+};
+const SESSION_COOKIE = 'lianli_session';
+const COOKIE_FLAGS = 'HttpOnly; SameSite=Lax; Path=/';
+
 function isAio(device) {
   return AIO_FAMILIES.has(device.family) || device.has_pump === true || device.has_pump_control === true;
 }
@@ -83,15 +92,12 @@ function listMedia(dir) {
   return found.sort();
 }
 
-function createApp({ daemon, engine, store, options, history }) {
+function createApp({ daemon, engine, store, options, history, auth }) {
   const publicDir = path.join(__dirname, 'public');
   const alertIds = new Set(Object.values(ALERT_TEMPLATES));
   const selectable = (colors = PRESETS.default, limits = store.data.limits) => (
     buildTemplates(options.statsDir, engine.getStats().volumes, colors, limits, engine.systemSensors).filter((item) => !alertIds.has(item.id))
   );
-  const passwordHash = options.password
-    ? crypto.createHash('sha256').update(options.password).digest()
-    : null;
   const uploadDir = () => options.uploadDir.split(path.sep).join('/');
   const allMedia = () => [...listMedia(options.mediaDir), ...listMedia(options.uploadDir)];
 
@@ -174,6 +180,7 @@ function createApp({ daemon, engine, store, options, history }) {
     const stats = selectStorage(engine.getStats(), store.data.storageVolume);
     const shown = store.data;
     const base = {
+      passwordResetOn: auth.resetOn,
       time: engine.now().toISOString(),
       localTime: engine.now().toLocaleString(),
       timezone: process.env.TZ || 'UTC',
@@ -706,13 +713,60 @@ function createApp({ daemon, engine, store, options, history }) {
 
   const sendJson = (res, status, value) => send(res, status, 'application/json', JSON.stringify(value));
 
-  function authorized(req) {
-    if (!passwordHash) return true;
-    const header = req.headers.authorization || '';
-    if (!header.startsWith('Basic ')) return false;
-    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
-    const given = crypto.createHash('sha256').update(decoded.slice(decoded.indexOf(':') + 1)).digest();
-    return crypto.timingSafeEqual(given, passwordHash);
+  function signedIn(req) {
+    const cookie = (req.headers.cookie || '').split(';').map((part) => part.trim()).find((part) => part.startsWith(`${SESSION_COOKIE}=`));
+    return Boolean(cookie) && auth.validSession(cookie.slice(SESSION_COOKIE.length + 1));
+  }
+
+  const sessionCookie = () => ({ 'Set-Cookie': `${SESSION_COOKIE}=${auth.session()}; ${COOKIE_FLAGS}; Max-Age=${SESSION_MS / 1000}` });
+  const okWithSession = (res) => send(res, 200, 'application/json', JSON.stringify({ ok: true }), sessionCookie());
+  const redirect = (res, location) => send(res, 302, 'text/plain', '', { Location: location });
+
+  // Everything reachable without a session. Returns false for anything else.
+  async function publicRoute(req, res, url) {
+    if (req.method === 'GET' && PUBLIC_FILES[url.pathname]) {
+      const [file, type] = PUBLIC_FILES[url.pathname];
+      send(res, 200, type, fs.readFileSync(path.join(publicDir, file)));
+    } else if (req.method === 'GET' && url.pathname === '/login') {
+      if (signedIn(req)) redirect(res, '/');
+      else send(res, 200, 'text/html; charset=utf-8', fs.readFileSync(path.join(publicDir, 'login.html')));
+    } else if (req.method === 'GET' && url.pathname === '/api/auth') {
+      sendJson(res, 200, { setup: auth.needsSetup, resetOn: auth.resetOn });
+    } else if (req.method === 'POST' && url.pathname.startsWith('/api/auth/')) {
+      if (req.headers['x-lianli-dashboard'] !== '1') sendJson(res, 403, { error: 'Forbidden' });
+      else await authAction(req, res, url.pathname.slice('/api/auth/'.length));
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  async function authAction(req, res, action) {
+    const address = req.socket.remoteAddress;
+    const tooMany = () => sendJson(res, 429, { error: 'Too many tries. Wait a minute and try again.' });
+    if (action === 'logout') {
+      return send(res, 200, 'application/json', JSON.stringify({ ok: true }), { 'Set-Cookie': `${SESSION_COOKIE}=; ${COOKIE_FLAGS}; Max-Age=0` });
+    }
+    if (action === 'setup') {
+      await auth.setup((await readBody(req)).password);
+      return okWithSession(res);
+    }
+    if (action === 'login') {
+      const { password } = await readBody(req);
+      if (!auth.allowTry(address)) return tooMany();
+      if (!(await auth.verify(password))) return sendJson(res, 401, { error: 'Wrong password' });
+      auth.clearTries(address);
+      return okWithSession(res);
+    }
+    if (action === 'change') {
+      if (!signedIn(req)) return sendJson(res, 401, { error: 'Sign in first' });
+      const { current, password } = await readBody(req);
+      if (!auth.allowTry(address)) return tooMany();
+      await auth.change(current, password);
+      auth.clearTries(address);
+      return okWithSession(res);
+    }
+    return sendJson(res, 404, { error: 'Not found' });
   }
 
   function readBody(req) {
@@ -743,10 +797,12 @@ function createApp({ daemon, engine, store, options, history }) {
 
   return http.createServer(async (req, res) => {
     try {
-      if (!authorized(req)) {
-        return send(res, 401, 'text/plain', 'Password required', { 'WWW-Authenticate': 'Basic realm="Lian Li"' });
-      }
       const url = new URL(req.url, 'http://localhost');
+      if (await publicRoute(req, res, url)) return undefined;
+      if (!signedIn(req)) {
+        if (req.method === 'GET' && url.pathname === '/') return redirect(res, '/login');
+        return sendJson(res, 401, { error: 'Sign in first' });
+      }
       if (req.method === 'GET' && STATIC_FILES[url.pathname]) {
         const [file, type] = STATIC_FILES[url.pathname];
         return send(res, 200, type, fs.readFileSync(path.join(publicDir, file)));
@@ -811,8 +867,10 @@ function main() {
     port: Number(env.WEB_PORT) || 6090,
     templatesDir: env.TEMPLATES_DIR || '/var/lib/lianli/templates',
     logFile: env.DAEMON_LOG || '/run/lianli-logs/daemon.log',
-    password: env.WEB_PASSWORD || '',
   };
+
+  const auth = new Auth(env.AUTH_FILE || path.join(path.dirname(options.settingsFile), 'auth.json'));
+  auth.applyReset(/^(1|true|yes|on)$/i.test((env.RESET_PASSWORD || '').trim()));
 
   const store = new Store(options.settingsFile);
   // The hottest AIO's coolant, for the alert and its LCD screen. 0 means no reading.
@@ -865,7 +923,7 @@ function main() {
     }
   }, HISTORY_INTERVAL_MS);
 
-  createApp({ daemon, engine, store, options, history }).listen(options.port, () => {
+  createApp({ daemon, engine, store, options, history, auth }).listen(options.port, () => {
     console.log(`lianli-extras: dashboard listening on port ${options.port}`);
   });
 }

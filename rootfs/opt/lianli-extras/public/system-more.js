@@ -63,6 +63,16 @@ function backupsCard() {
   </div>`;
 }
 
+function passwordCard() {
+  return `<div class="card"><div class="card-head"><h2>Password</h2><button class="btn link" id="signOut">Sign out</button></div>
+    ${data.passwordResetOn ? '<p class="warn">Reset dashboard password is still set to yes in the container settings. Set it back to no, so it works next time you need it.</p>' : ''}
+    <label>Current password<input type="password" id="passwordCurrent" data-password autocomplete="current-password" maxlength="256"></label>
+    <label>New password<input type="password" id="passwordNew" data-password autocomplete="new-password" maxlength="256"></label>
+    <label>Confirm new password<input type="password" id="passwordConfirm" data-password autocomplete="new-password" maxlength="256"></label>
+    <p class="muted">Changing it signs out every other browser.</p>
+    <div class="actions"><button class="btn" id="passwordChange">Change password</button></div></div>`;
+}
+
 function diagnosticsCard() {
   return `<div class="card"><div class="card-head"><h2>Diagnostics</h2></div>
     <p class="muted" style="margin:0 0 12px">Downloads a report for troubleshooting: daemon details, health checks and recent log lines with paths and secrets removed. Check it before sharing it.</p>
@@ -95,6 +105,7 @@ async function loadBackups() {
 }
 
 holds.push(() => tab === 'system' && backupPreview !== null);
+holds.push(() => tab === 'system' && [...view.querySelectorAll('[data-password]')].some((input) => input.value));
 
 view.addEventListener('change', (event) => {
   const { target } = event;
@@ -118,7 +129,19 @@ view.addEventListener('click', async (event) => {
   if (!target) return;
   const set = target.dataset;
   try {
-    if (target.id === 'backupFind') {
+    if (target.id === 'signOut') {
+      await post('/api/auth/logout', {});
+      window.location.replace('/login');
+    } else if (target.id === 'passwordChange') {
+      const value = (id) => document.getElementById(id).value;
+      if (value('passwordNew') !== value('passwordConfirm')) {
+        toast('The new passwords don\'t match', true);
+        return;
+      }
+      await post('/api/auth/change', { current: value('passwordCurrent'), password: value('passwordNew') });
+      for (const input of view.querySelectorAll('[data-password]')) input.value = '';
+      toast('Password changed');
+    } else if (target.id === 'backupFind') {
       await loadBackups();
       renderSystem();
     } else if (set.backup !== undefined) {

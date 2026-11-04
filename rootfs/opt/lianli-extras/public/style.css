@@ -112,8 +112,11 @@ nav button[aria-selected="true"] { color: var(--accent); font-weight: 650; }
 /* Controls */
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 0; }
 input, select, button { font: inherit; color: var(--text); }
-select, input[type=number], input[type=time], input[type=text] { width: 100%; min-height: 42px; padding: 8px 11px; background: var(--raised); border: 1px solid transparent; border-radius: var(--radius-small); margin-top: 5px; }
-select:hover, input[type=number]:hover, input[type=time]:hover, input[type=text]:hover { border-color: var(--line-strong); }
+.login-page main { max-width: 400px; padding-top: 12vh; }
+.login-page h1 { font-size: 20px; }
+.login-page [hidden] { display: none; }
+select, input[type=number], input[type=time], input[type=text], input[type=password] { width: 100%; min-height: 42px; padding: 8px 11px; background: var(--raised); border: 1px solid transparent; border-radius: var(--radius-small); margin-top: 5px; }
+select:hover, input[type=number]:hover, input[type=time]:hover, input[type=text]:hover, input[type=password]:hover { border-color: var(--line-strong); }
 input[type=text]::placeholder { color: var(--muted); }
 input[type=range] { width: 100%; height: 30px; margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
 input[type=color] { width: 100%; height: 42px; padding: 3px; background: var(--raised); border: 1px solid transparent; border-radius: var(--radius-small); margin-top: 5px; cursor: pointer; }
