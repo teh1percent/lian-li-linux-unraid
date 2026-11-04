@@ -18,7 +18,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+header { display: flex; align-items: center; gap: 12px; max-width: 860px; margin: 0 auto; padding: 14px 16px; }
 h1 { font-size: 18px; margin: 0; flex: 1; }
 h2 { font-size: 15px; margin: 0 0 10px; }
 a { color: var(--accent); }
@@ -139,16 +139,22 @@ function renderOverview() {
   } else {
     const hottest = stats.hasTemps ? `<b class="${tempClass(values.disk_temp_max)}">${values.disk_temp_max}°C</b>` : '<b>Asleep</b>';
     const sync = values.sync_pct > 0 ? `${values.sync_pct}%` : 'Idle';
+    const storageName = stats.volumes.find((volume) => volume.key === stats.selectedVolume)?.name || 'Storage';
     html += `<div class="grid">
       <div class="stat">${hottest}<span>Hottest drive</span></div>
       <div class="stat"><b>${values.disks_active}/${values.disks_total}</b><span>Drives awake</span></div>
-      <div class="stat"><b>${values.storage_used_pct}%</b><span>Storage used</span></div>
+      <div class="stat"><b>${values.storage_used_pct}%</b><span>${esc(storageName)} used</span></div>
       <div class="stat"><b>${values.storage_free_tb}</b><span>TB free</span></div>
       ${stats.hasArray ? `<div class="stat"><b class="${values.parity_errors ? 'bad' : ''}">${values.parity_errors}</b><span>Parity errors</span></div>
       <div class="stat"><b>${sync}</b><span>Parity check</span></div>` : ''}
     </div>`;
     if (stats.volumes.length) {
-      html += `<div class="card"><h2>Storage</h2>${stats.volumes.map((volume) => `<div class="row"><span>${esc(volume.name)}</span><span class="num">${volume.usedPct}% used, ${volume.freeTb} of ${volume.sizeTb} TB free</span></div>`).join('')}</div>`;
+      const picker = stats.volumes.length > 1 ? `<label>Show on this page and the LCD screens
+        <select data-storage>
+          <option value="all" ${stats.selectedVolume === 'all' ? 'selected' : ''}>All storage</option>
+          ${stats.volumes.map((volume) => `<option value="${esc(volume.key)}" ${stats.selectedVolume === volume.key ? 'selected' : ''}>${esc(volume.name)}</option>`).join('')}
+        </select></label>` : '';
+      html += `<div class="card"><h2>Storage</h2>${picker}${stats.volumes.map((volume) => `<div class="row"><span>${esc(volume.name)}</span><span class="num">${volume.usedPct}% used, ${volume.freeTb} of ${volume.sizeTb} TB free</span></div>`).join('')}</div>`;
     }
   }
   const fans = devices.filter((device) => device.hasFan);
@@ -342,6 +348,9 @@ view.addEventListener('change', (event) => {
     act('/api/fan', { device_id: deviceOf(target), mode: 'constant', percent: Number(target.value) });
   } else if (target.matches('[data-rgb-mode], [data-rgb-color], [data-rgb-brightness]')) {
     act('/api/rgb', rgbBody(target.closest('[data-device]')));
+  } else if (target.matches('[data-storage]')) {
+    target.blur();
+    act('/api/storage', { volume: target.value });
   } else if (target.matches('[data-screen]')) {
     const [kind, ...rest] = target.value.split(':');
     const value = rest.join(':');

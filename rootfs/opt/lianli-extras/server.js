@@ -12,7 +12,7 @@ const path = require('path');
 const { DaemonClient } = require('./lib/daemon');
 const { Engine, Store, mediaType, ALERT_TEMPLATES } = require('./lib/engine');
 const { buildTemplates } = require('./lib/templates');
-const { readStats, writeStats } = require('./lib/unraid');
+const { readStats, selectStorage, writeStats } = require('./lib/unraid');
 
 const STATS_INTERVAL_MS = 5000;
 const ENGINE_INTERVAL_MS = 15000;
@@ -73,7 +73,7 @@ function createApp({ daemon, engine, store, options }) {
   };
 
   async function state() {
-    const stats = engine.getStats();
+    const stats = selectStorage(engine.getStats(), store.data.storageVolume);
     const base = {
       time: engine.now().toISOString(),
       localTime: engine.now().toLocaleString(),
@@ -189,6 +189,12 @@ function createApp({ daemon, engine, store, options }) {
     await engine.tick();
   }
 
+  async function setStorage(body) {
+    check(body.volume === 'all' || engine.getStats().volumes.some((item) => item.key === body.volume), 'Unknown pool');
+    store.data.storageVolume = body.volume;
+    store.save();
+  }
+
   async function setSchedules(body) {
     check(Array.isArray(body.schedules) && body.schedules.length <= 16, 'Too many schedules');
     const clean = [];
@@ -232,6 +238,7 @@ function createApp({ daemon, engine, store, options }) {
     '/api/fan': setFan,
     '/api/rgb': setRgb,
     '/api/screen': setScreen,
+    '/api/storage': setStorage,
     '/api/schedules': setSchedules,
     '/api/alerts': setAlerts,
     '/api/alerts/mute': muteAlerts,
@@ -336,11 +343,12 @@ function main() {
     password: env.WEB_PASSWORD || '',
   };
 
+  const store = new Store(options.settingsFile);
   let stats = readStats(options.emhttpDir);
   const collect = () => {
     stats = readStats(options.emhttpDir);
     try {
-      writeStats(options.statsDir, stats.values);
+      writeStats(options.statsDir, selectStorage(stats, store.data.storageVolume).values);
     } catch (error) {
       stats.error = `Cannot write ${options.statsDir}: ${error.message}`;
     }
@@ -349,7 +357,6 @@ function main() {
   setInterval(collect, STATS_INTERVAL_MS);
 
   const daemon = new DaemonClient(options.socket);
-  const store = new Store(options.settingsFile);
   const engine = new Engine({ daemon, store, statsDir: options.statsDir, getStats: () => stats });
   engine.tick();
   setInterval(() => engine.tick(), ENGINE_INTERVAL_MS);

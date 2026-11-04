@@ -88,12 +88,14 @@ need the host's hwmon temperature sensors under `/sys`.
 Open `http://<server>:6090` on a phone or computer.
 
 - **Status:** hottest drive, storage per pool and array, fan speeds, and parity
-  state if you have a classic array.
+  state if you have a classic array. The **Storage** picker chooses whether the
+  page and the Storage and Overview LCD screens show all storage or one pool.
 - **Fans:** fixed speed (20% minimum here) or any curve made in the full app.
 - **Lights:** effect, colour and brightness per fan group, or all at once.
 - **Screens:** choose what each LCD shows: an Unraid screen or a file from the
-  LCD media folder. Storage can show everything together or one pool, and new
-  pools get a screen automatically. **Different stat on each fan** assigns them in turn.
+  LCD media folder. Each pool also has its own screen, so different fans can show
+  different pools, and new pools get one automatically. **Different stat on each
+  fan** assigns them in turn.
 - **Automation:** schedules (screen brightness, optional screen swap) and alerts
   that take over every screen for a hot drive, a disk problem or parity errors.
   Muting lasts 24 hours. Schedules don't change fan speeds.

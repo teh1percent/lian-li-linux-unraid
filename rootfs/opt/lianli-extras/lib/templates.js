@@ -12,11 +12,16 @@ const BLACK = { type: 'color', rgb: [0, 0, 0, 255] };
 const ALERT_RED = { type: 'color', rgb: [120, 0, 0, 255] };
 const UPDATE_MS = 2000;
 
-const thresholds = (warn, danger) => [
-  { max: warn, color: GREEN, alpha: 255 },
-  { max: danger, color: AMBER, alpha: 255 },
-  { max: null, color: RED, alpha: 255 },
-];
+// The daemon compares range limits with the percentage of the widget's value
+// range, not with the value itself, so real limits are converted here.
+const thresholds = (warn, danger, min = 0, max = 100) => {
+  const percent = (limit) => Math.round(((limit - min) / (max - min)) * 100);
+  return [
+    { max: percent(warn), color: GREEN, alpha: 255 },
+    { max: percent(danger), color: AMBER, alpha: 255 },
+    { max: null, color: RED, alpha: 255 },
+  ];
+};
 
 function label(id, text, y, fontSize, { x = 200, width = 320, color = WHITE, align = 'center' } = {}) {
   return {
@@ -53,7 +58,6 @@ function template(id, name, background, widgets) {
 
 function buildTemplates(statsDir, volumes = []) {
   const stat = (key) => ({ type: 'command', cmd: `cat ${statsDir}/${key}` });
-  const tempRanges = thresholds(40, 50);
   const storage = (id, name, title, usedKey, freeKey) => template(id, name, BLACK, [
     gauge(stat(usedKey), 0, 100, thresholds(75, 90)),
     label('title', title, 84, 36),
@@ -64,13 +68,13 @@ function buildTemplates(statsDir, volumes = []) {
 
   return [
     template('unraid_drives', 'Unraid: Drives', BLACK, [
-      gauge(stat('disk_temp_max'), 20, 65, tempRanges),
+      gauge(stat('disk_temp_max'), 20, 65, thresholds(40, 50, 20, 65)),
       label('title', 'DRIVES', 84, 36),
       value('temp', stat('disk_temp_max'), 186, 120, { max: 65 }),
       label('unit', 'hottest °C', 266, 26, { color: MUTED }),
       value('active', stat('disks_active'), 312, 26, { width: 160, unit: ' awake', color: MUTED }),
     ]),
-    storage('unraid_array', 'Unraid: All storage', 'STORAGE', 'storage_used_pct', 'storage_free_tb'),
+    storage('unraid_array', 'Unraid: Storage (picked on Status)', 'STORAGE', 'storage_used_pct', 'storage_free_tb'),
     ...volumes.map(({ name, key }) => storage(
       `unraid_volume_${key}`, `Unraid: ${name}`, name.toUpperCase(), `volume_${key}_used_pct`, `volume_${key}_free_tb`,
     )),
@@ -84,7 +88,7 @@ function buildTemplates(statsDir, volumes = []) {
     template('unraid_overview', 'Unraid: Overview', BLACK, [
       label('title', 'UNRAID', 64, 36),
       label('temp_l', 'Hottest', 126, 30, { x: 125, width: 150, color: MUTED, align: 'left' }),
-      value('temp', stat('disk_temp_max'), 126, 42, { x: 280, width: 130, unit: '°', align: 'right', ranges: tempRanges, max: 65 }),
+      value('temp', stat('disk_temp_max'), 126, 42, { x: 280, width: 130, unit: '°', align: 'right', ranges: thresholds(40, 50, 0, 65), max: 65 }),
       label('used_l', 'Used', 190, 30, { x: 125, width: 150, color: MUTED, align: 'left' }),
       value('used', stat('storage_used_pct'), 190, 42, { x: 280, width: 130, unit: '%', align: 'right', ranges: thresholds(75, 90) }),
       label('free_l', 'Free TB', 254, 30, { x: 125, width: 150, color: MUTED, align: 'left' }),

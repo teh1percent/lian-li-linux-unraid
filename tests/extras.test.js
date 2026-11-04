@@ -125,6 +125,22 @@ test('templates respect limits the daemon validates and read only stat files', (
   }
 });
 
+test('temperature colours change at real degrees, as the daemon reads ranges', () => {
+  // Same calculation as range_color and unit_interval in lianli-media.
+  const colourAt = (widget, reading) => {
+    const { ranges, value_min: min, value_max: max } = widget.kind;
+    const percent = Math.min(Math.max((reading - min) / (max - min), 0), 1) * 100;
+    return ranges.find((range) => range.max === null || percent <= range.max).color.join();
+  };
+  const [drives, , , overview] = buildTemplates('/run/lianli-stats');
+  const widgets = [drives.widgets.find((w) => w.id === 'gauge'), overview.widgets.find((w) => w.id === 'temp')];
+  for (const widget of widgets) {
+    assert.strictEqual(colourAt(widget, 33), '0,200,90', widget.id);
+    assert.strictEqual(colourAt(widget, 45), '230,150,0', widget.id);
+    assert.strictEqual(colourAt(widget, 55), '225,40,40', widget.id);
+  }
+});
+
 test('schedules handle overnight ranges and days', () => {
   const night = { enabled: true, start: '23:00', end: '07:00', days: [] };
   assert.ok(scheduleActive(night, new Date(2026, 10, 3, 23, 30)));
@@ -179,6 +195,26 @@ test('a screen can show all storage or one pool, and new pools get a screen', as
   await engine.tick();
   assert.strictEqual(engine.lastError, null);
   assert.ok(mock.state.templates.some((item) => item.id === 'unraid_volume_tank'));
+});
+
+test('the storage picker chooses one pool, remembers it and falls back to all', async () => {
+  const before = await (await call('/api/state')).json();
+  assert.strictEqual(before.stats.selectedVolume, 'all');
+  assert.strictEqual(before.stats.values.storage_used_pct, 71.2);
+
+  assert.strictEqual((await call('/api/storage', { volume: 'cache' })).status, 200);
+  const picked = await (await call('/api/state')).json();
+  assert.strictEqual(picked.stats.selectedVolume, 'cache');
+  assert.strictEqual(picked.stats.values.storage_used_pct, 25);
+  assert.strictEqual(new Store(store.file).data.storageVolume, 'cache');
+
+  assert.strictEqual((await call('/api/storage', { volume: '../../etc' })).status, 400);
+  assert.strictEqual(store.data.storageVolume, 'cache');
+
+  stats.volumes = stats.volumes.filter((volume) => volume.key !== 'cache');
+  const removed = await (await call('/api/state')).json();
+  assert.strictEqual(removed.stats.selectedVolume, 'all');
+  assert.strictEqual(removed.stats.values.storage_used_pct, 71.2);
 });
 
 test('media must come from the media folder', async () => {

@@ -161,6 +161,18 @@ function readStats(emhttpDir) {
   }
 }
 
+// Points the storage values at one pool. A pool that no longer exists falls
+// back to all storage.
+function selectStorage(stats, key) {
+  const volume = stats.volumes.find((item) => item.key === key);
+  if (!volume) return { ...stats, selectedVolume: 'all' };
+  return {
+    ...stats,
+    selectedVolume: volume.key,
+    values: { ...stats.values, storage_used_pct: volume.usedPct, storage_free_tb: volume.freeTb },
+  };
+}
+
 function writeStats(statsDir, values) {
   fs.mkdirSync(statsDir, { recursive: true });
   for (const [key, value] of Object.entries(values)) {
@@ -170,4 +182,4 @@ function writeStats(statsDir, values) {
   }
 }
 
-module.exports = { parseIni, computeStats, readStats, writeStats, EMPTY_VALUES };
+module.exports = { parseIni, computeStats, readStats, selectStorage, writeStats, EMPTY_VALUES };

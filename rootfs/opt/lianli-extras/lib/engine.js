@@ -23,6 +23,7 @@ const ALERT_TEMPLATES = {
 
 const defaults = () => ({
   screens: {},
+  storageVolume: 'all',
   schedules: [],
   alerts: { enabled: false, diskTempC: 50, diskProblem: true, parityErrors: true, muteUntil: 0 },
   snapshots: {},
