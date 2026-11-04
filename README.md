@@ -7,6 +7,8 @@ for Unraid. One container runs:
   `lianli-daemon-system.service` does. It keeps fan curves, RGB and LCDs running.
 - The upstream Tauri GUI on a virtual X display, which you open in the browser
   through noVNC on port **6080**.
+- A phone-friendly dashboard on port **6090**, with Unraid stats on the LCD fans,
+  schedules and alerts. See [Dashboard and Unraid features](#dashboard-and-unraid-features).
 
 The image installs the upstream **Debian 13 release `.deb`** (checked against the
 release's `SHA256SUMS`), so there is no Rust/Node build.
@@ -19,7 +21,9 @@ rootfs/usr/local/bin/
   entrypoint.sh                  container setup that systemd/tmpfiles/udev would normally do
   sync-devices.sh                mirrors /dev/bus/usb and /dev/hidraw* from sysfs (udev stand-in)
   run-gui.sh                     launches lianli-gui and restarts it if the window is closed
+rootfs/opt/lianli-extras/        dashboard, Unraid stats and LCD automation (Node, no dependencies)
 rootfs/etc/supervisor/supervisord.conf
+tests/                           tests against a mock daemon: node --test tests/extras.test.js
 unraid/lian-li-linux.xml         Unraid Docker template
 .github/workflows/docker.yml     builds and pushes to ghcr.io
 ```
@@ -64,16 +68,49 @@ The template defaults to:
 
 | Setting | Container | Default |
 |---|---|---|
-| WebUI | `6080/tcp` | `6080` |
+| Dashboard (WebUI) | `6090/tcp` | `6090` |
+| Full app | `6080/tcp` | `6080` |
 | AppData | `/var/lib/lianli` | `/mnt/user/appdata/lian-li-linux` |
 | LCD media (read-only) | `/media/lianli` | `/mnt/user/appdata/lian-li-linux/media` |
+| Unraid state (read-only) | `/host/emhttp` | `/var/local/emhttp` |
+| `WEB_PASSWORD` | | empty (no password) |
 | `VNC_PASSWORD` | | empty (no password) |
+| `FULL_APP_PORT` | | `6080` (host port for the dashboard's link to the full app) |
 | `PUID` / `PGID` | | `99` / `100` |
 | `DISPLAY_WIDTH` / `DISPLAY_HEIGHT` | | `1440` / `900` |
 | `LOG_LEVEL` | | `info` |
 
 **Privileged** is on. The daemon needs it for raw USB/HID access, and fan curves
 need the host's hwmon temperature sensors under `/sys`.
+
+## Dashboard and Unraid features
+
+Open `http://<server>:6090` on a phone or computer.
+
+- **Status:** hottest drive, array and cache usage, parity state, fan speeds.
+- **Fans:** fixed speed (20% minimum here) or any curve made in the full app.
+- **Lights:** effect, colour and brightness per fan group, or all at once.
+- **Screens:** choose what each LCD shows: an Unraid screen or a file from the
+  LCD media folder. **Different stat on each fan** assigns them in turn.
+- **Automation:** schedules (screen brightness, optional screen swap) and alerts
+  that take over every screen for a hot drive, a disk problem or parity errors.
+  Muting lasts 24 hours. Schedules don't change fan speeds.
+
+An LCD left on **Set in the full app** is only touched while an alert or a
+screen-swapping schedule is active, and is restored afterwards. An LCD given a
+screen here is kept on that screen, so change it here rather than in the full app.
+
+Drive data comes from Unraid's own status files, so sleeping drives are never
+woken. When every drive is asleep, the LCD screens show the hottest drive as 0.
+
+The API only offers fixed operations with validated values. It can't set sensor
+commands, because the daemon runs those as shell. It still controls cooling, so
+set `WEB_PASSWORD` unless you trust everyone on the network.
+
+Settings are stored in `extras/settings.json` in AppData. The current values are
+files in `/run/lianli-stats` inside the container. You can use them in your own
+templates and fan curves, for example with the sensor command
+`cat /run/lianli-stats/disk_temp_max`.
 
 ## How it works around the container check
 
@@ -122,6 +159,12 @@ Check which devices the container can see from Unraid's terminal:
 
 ```bash
 docker exec lian-li-linux sh -c 'ls -l /dev/hidraw* /dev/bus/usb/*/*'
+```
+
+Check the Unraid values the dashboard and LCD screens use:
+
+```bash
+docker exec lian-li-linux sh -c 'grep . /run/lianli-stats/*'
 ```
 
 Upstream also ships a non-GUI diagnostic:

@@ -1,0 +1,132 @@
+'use strict';
+
+// Reads Unraid's array state from the files emhttp keeps in /var/local/emhttp.
+// Temperatures come from disks.ini rather than smartctl, so sleeping drives are
+// never woken. The results are written as one small file per value because LCD
+// and fan sensor commands have a 1 second limit: they only `cat` these files.
+
+const fs = require('fs');
+const path = require('path');
+
+const ARRAY_TYPES = new Set(['Data', 'Parity', 'Cache']);
+const BAD_STATUS = new Set(['DISK_DSBL', 'DISK_DSBL_NEW', 'DISK_INVALID', 'DISK_WRONG', 'DISK_NP_MISSING']);
+const KB_PER_TB = 1024 ** 3;
+
+const EMPTY_VALUES = {
+  disk_temp_max: 0,
+  disk_temp_avg: 0,
+  disks_active: 0,
+  disks_total: 0,
+  disk_errors: 0,
+  disks_bad: 0,
+  array_used_pct: 0,
+  array_free_tb: 0,
+  cache_used_pct: 0,
+  parity_errors: 0,
+  sync_pct: 0,
+  array_started: 0,
+};
+
+function parseIni(text) {
+  const sections = {};
+  const root = {};
+  let current = root;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith(';') || line.startsWith('#')) continue;
+    const header = line.match(/^\[\s*"?([^"\]]*)"?\s*\]$/);
+    if (header) {
+      current = {};
+      sections[header[1]] = current;
+      continue;
+    }
+    const pair = line.match(/^([^=]+)=(.*)$/);
+    if (pair) current[pair[1].trim()] = pair[2].trim().replace(/^"(.*)"$/, '$1');
+  }
+  return { root, sections };
+}
+
+function number(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function round(value, places = 1) {
+  const factor = 10 ** places;
+  return Math.round(value * factor) / factor;
+}
+
+function computeStats(disksText, varText) {
+  const disks = Object.entries(parseIni(disksText).sections)
+    .map(([id, disk]) => ({ id, ...disk }))
+    .filter((disk) => ARRAY_TYPES.has(disk.type) && disk.device && !disk.status?.startsWith('DISK_NP'));
+  const vars = parseIni(varText).root;
+
+  const temps = disks.map((disk) => Number(disk.temp)).filter((temp) => Number.isFinite(temp) && temp > 0);
+  const bad = disks.filter((disk) => BAD_STATUS.has(disk.status) || (disk.color || '').startsWith('red'));
+  const errors = disks.reduce((sum, disk) => sum + number(disk.numErrors), 0);
+  const usage = (type) => {
+    const list = disks.filter((disk) => disk.type === type && number(disk.fsSize) > 0);
+    const size = list.reduce((sum, disk) => sum + number(disk.fsSize), 0);
+    const free = list.reduce((sum, disk) => sum + number(disk.fsFree), 0);
+    return { size, free, pct: size > 0 ? ((size - free) / size) * 100 : 0 };
+  };
+  const data = usage('Data');
+  const cache = usage('Cache');
+  const syncSize = number(vars.mdResyncSize) || number(vars.mdResync);
+  const syncPos = number(vars.mdResyncPos);
+
+  return {
+    values: {
+      disk_temp_max: temps.length ? Math.max(...temps) : 0,
+      disk_temp_avg: temps.length ? round(temps.reduce((a, b) => a + b, 0) / temps.length) : 0,
+      disks_active: temps.length,
+      disks_total: disks.length,
+      disk_errors: errors,
+      disks_bad: bad.length,
+      array_used_pct: round(data.pct),
+      array_free_tb: round(data.free / KB_PER_TB),
+      cache_used_pct: round(cache.pct),
+      parity_errors: number(vars.sbSyncErrs),
+      sync_pct: syncPos > 0 && syncSize > 0 ? round((syncPos / syncSize) * 100) : 0,
+      array_started: vars.mdState === 'STARTED' ? 1 : 0,
+    },
+    hasTemps: temps.length > 0,
+    disks: disks.map((disk) => ({
+      name: disk.name || disk.id,
+      type: disk.type,
+      temp: Number.isFinite(Number(disk.temp)) ? Number(disk.temp) : null,
+      errors: number(disk.numErrors),
+      bad: bad.includes(disk),
+    })),
+    arrayState: vars.mdState || 'UNKNOWN',
+  };
+}
+
+function readStats(emhttpDir) {
+  try {
+    const disks = fs.readFileSync(path.join(emhttpDir, 'disks.ini'), 'utf8');
+    const vars = fs.readFileSync(path.join(emhttpDir, 'var.ini'), 'utf8');
+    return { available: true, error: null, ...computeStats(disks, vars) };
+  } catch (error) {
+    return {
+      available: false,
+      error: `Cannot read Unraid state in ${emhttpDir}: ${error.code || error.message}`,
+      values: { ...EMPTY_VALUES },
+      hasTemps: false,
+      disks: [],
+      arrayState: 'UNKNOWN',
+    };
+  }
+}
+
+function writeStats(statsDir, values) {
+  fs.mkdirSync(statsDir, { recursive: true });
+  for (const [key, value] of Object.entries(values)) {
+    const target = path.join(statsDir, key);
+    fs.writeFileSync(`${target}.tmp`, `${value}\n`);
+    fs.renameSync(`${target}.tmp`, target);
+  }
+}
+
+module.exports = { parseIni, computeStats, readStats, writeStats, EMPTY_VALUES };

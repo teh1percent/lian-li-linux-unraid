@@ -13,7 +13,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl \
       xvfb x11vnc openbox novnc python3-websockify \
-      dbus dbus-x11 supervisor procps tzdata \
+      dbus dbus-x11 supervisor procps tzdata nodejs \
       fonts-dejavu-core fonts-noto-color-emoji \
       libgl1-mesa-dri \
  && rm -rf /var/lib/apt/lists/*
@@ -44,6 +44,8 @@ ENV DISPLAY=:0 \
     PGID=100 \
     LOG_LEVEL=info \
     VNC_PASSWORD= \
+    WEB_PASSWORD= \
+    FULL_APP_PORT=6080 \
     GDK_BACKEND=x11 \
     WEBKIT_DISABLE_COMPOSITING_MODE=1 \
     WEBKIT_DISABLE_DMABUF_RENDERER=1 \
@@ -51,6 +53,6 @@ ENV DISPLAY=:0 \
     NO_AT_BRIDGE=1
 
 VOLUME ["/var/lib/lianli"]
-EXPOSE 6080
+EXPOSE 6080 6090
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

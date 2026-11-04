@@ -26,6 +26,7 @@ install -d -m 0750 -o lianli -g lianli /var/lib/lianli
 chown -R lianli:lianli /var/lib/lianli
 install -d -m 0700 -o lianli -g lianli /tmp/runtime-lianli
 install -d -m 0755 -o lianli -g lianli /home/lianli
+install -d -m 0755 -o lianli -g lianli /run/lianli-stats
 usermod -d /home/lianli lianli 2>/dev/null || true
 
 # Device nodes must exist with lianli group access before the daemon starts.
