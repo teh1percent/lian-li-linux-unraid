@@ -11,7 +11,8 @@ const { Auth } = require(path.join(extras, 'lib', 'auth'));
 const { DaemonClient } = require(path.join(extras, 'lib', 'daemon'));
 const { Engine, Store, scheduleActive } = require(path.join(extras, 'lib', 'engine'));
 const { History } = require(path.join(extras, 'lib', 'history'));
-const { buildTemplates, tempSensors } = require(path.join(extras, 'lib', 'templates'));
+const { toScreenSource } = require(path.join(extras, 'lib', 'sources'));
+const { buildTemplates, tempSensors, sensorKey, sensorKeysInUse, screenGroups } = require(path.join(extras, 'lib', 'templates'));
 const { computeStats, readStats, writeStats, EMPTY_VALUES } = require(path.join(extras, 'lib', 'unraid'));
 const { createApp } = require(path.join(extras, 'server'));
 const { createMockDaemon } = require('./mock-daemon');
@@ -1099,6 +1100,65 @@ test('temperature sensors skip commands and per-core readings, with the CPU firs
   assert.strictEqual(new Set(sensors.map((sensor) => sensor.key)).size, 2);
   assert.strictEqual(sensors[0].cpu, true);
   assert.strictEqual(sensors[1].cpu, false);
+});
+
+// Named the way a real server reports them: the raw label says nothing about the reading.
+const named = (source, display, label = 'temp1') => ({ source: { type: 'hwmon', name: source, label, device_path: `/${display}` }, display_name: display, unit: 'C' });
+const REAL_SENSORS = [
+  named('coretemp', 'CPU: Control Temp'),
+  named('coretemp', 'CPU: Temp Core 0', 'temp2'),
+  named('coretemp', 'CPU: Temp Core 12', 'temp14'),
+  named('nvme', 'TEAM TM8FPW004T: Composite'),
+  named('nvme', 'Samsung SSD 980 PRO 1TB: Composite'),
+  named('nvme', 'Samsung SSD 980 PRO 1TB: Sensor 1', 'temp2'),
+  named('nvme', 'Samsung SSD 980 PRO 1TB: Sensor 2', 'temp3'),
+  named('r8169', 'eth0: MAC Temperature', 'temp2'),
+  named('r8169', 'eth0: PHY Temperature'),
+  named('iwlwifi_1', 'iwlwifi_1: temp1'),
+];
+
+test('sensor screens skip redundant readings even when the raw label is meaningless', () => {
+  const sensors = tempSensors(REAL_SENSORS);
+  assert.deepStrictEqual(sensors.map((sensor) => [sensor.name, sensor.title]), [
+    ['CPU: Control Temp', 'CPU'],
+    ['TEAM TM8FPW004T: Composite', 'TEAM TM8FPW004T'],
+    ['Samsung SSD 980 PRO 1TB: Composite', 'SAMSUNG 980 PRO'],
+    ['eth0: MAC Temperature', 'ETH0'],
+  ]);
+});
+
+test('an extra reading stays when its device has no main reading', () => {
+  const sensors = tempSensors([named('r8169', 'eth1: PHY Temperature'), named('x', 'Board: Sensor 1')]);
+  assert.deepStrictEqual(sensors.map((sensor) => sensor.title), ['ETH1', 'BOARD']);
+});
+
+test('a hidden sensor stays while an LCD or schedule uses its screen', () => {
+  const key = (name) => {
+    const { source } = REAL_SENSORS.find((sensor) => sensor.display_name === name);
+    const hash = sensorKey(toScreenSource(source));
+    return tempSensors(REAL_SENSORS, new Set([hash])).find((sensor) => sensor.key === hash);
+  };
+  const core = key('CPU: Temp Core 12');
+  assert.strictEqual(core.title, 'CORE 12');
+  const onLcd = sensorKeysInUse({ screens: { a: { kind: 'template', templateId: `unraid_temp_${core.key}` }, b: { kind: 'keep' } }, schedules: [] });
+  assert.ok(tempSensors(REAL_SENSORS, onLcd).some((sensor) => sensor.key === core.key));
+  const wifi = key('iwlwifi_1: temp1');
+  const onSchedule = sensorKeysInUse({ screens: {}, schedules: [{ templateId: `unraid_temp_${wifi.key}` }, { templateId: null }] });
+  assert.ok(tempSensors(REAL_SENSORS, onSchedule).some((sensor) => sensor.key === wifi.key));
+  assert.strictEqual(sensorKeysInUse({ screens: {}, schedules: [] }).size, 0);
+});
+
+test('the gallery groups every screen it lists, with pools and sensors collapsed', async () => {
+  const volumes = [{ name: 'cache', key: 'cache' }];
+  const sensors = tempSensors(REAL_SENSORS);
+  const groups = screenGroups(volumes, sensors);
+  assert.deepStrictEqual(groups.map((group) => [group.name, group.open]), [['All storage', true], ['System', true], ['cache', false], ['Temperature sensors', false]]);
+  const built = new Set(buildTemplates('/run/lianli-stats', volumes, undefined, undefined, sensors).map((item) => item.id));
+  const shown = groups.flatMap((group) => group.screens.map((item) => item.id));
+  assert.ok(shown.every((id) => built.has(id)), 'each preview is a real screen');
+  assert.deepStrictEqual(shown.filter((_, index) => index < 6), ['unraid_drives', 'unraid_array', 'unraid_overview', 'unraid_system', 'unraid_memory', 'unraid_sysinfo']);
+  assert.deepStrictEqual([...built].filter((id) => !id.startsWith('unraid_alert_') && !shown.includes(id)), [], 'no screen is missing from the gallery');
+  assert.ok((await stateOf()).screenGroups.length >= 2);
 });
 
 test('the system page script carries the version and credits', async () => {

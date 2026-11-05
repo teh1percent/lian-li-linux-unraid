@@ -626,8 +626,10 @@ function renderScreens() {
          <div class="actions" style="align-self:end"><button class="btn" id="pixelStart">Start</button></div></div>`}
     </div>`;
   }
-  html += `<div class="card"><div class="card-head"><h2>Unraid screens</h2></div><div class="gallery">${data.templates.map((item) => `<figure><img loading="lazy" alt="${esc(item.name)} preview" src="/api/preview?id=${encodeURIComponent(item.id)}"><figcaption>${esc(item.name.replace('Unraid: ', ''))}</figcaption></figure>`).join('')}</div>
-    <p class="muted">Previews come from the daemon, so live values can show as blank here.</p></div>`;
+  const preview = (item) => `<figure><img loading="lazy" alt="${esc(item.name)} preview" src="/api/preview?id=${encodeURIComponent(item.id)}"><figcaption>${esc(item.name)}</figcaption></figure>`;
+  html += `<div class="card"><div class="card-head"><h2>Unraid screens</h2></div>
+    ${data.screenGroups.map((group) => `<details class="panel" ${panelAttrs(`gallery:${group.id}`, group.open)}><summary>${esc(group.name)}</summary><div class="gallery">${group.screens.map(preview).join('')}</div></details>`).join('')}
+    <p class="muted">Previews may not show live values. Choose a screen in each LCD's Shows list. The Storage and Overview screens under All storage follow the Storage choice on the Status page.</p></div>`;
   html += catalogCard() + storageCleanupCard();
   view.innerHTML = html;
   lcds.forEach((device) => { view.querySelector(`[data-screen="${CSS.escape(device.id)}"]`).value = shownScreenValue(device); });

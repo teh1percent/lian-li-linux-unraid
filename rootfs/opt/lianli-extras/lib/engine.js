@@ -7,7 +7,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { installTemplates, wantedTemplates, themedId, tempSensors } = require('./templates');
+const { installTemplates, wantedTemplates, themedId, tempSensors, sensorKeysInUse } = require('./templates');
 const { DEFAULT_LIMITS } = require('./themes');
 
 const SENSOR_REFRESH_MS = 5 * 60 * 1000;
@@ -201,7 +201,7 @@ class Engine {
     if (this.sensorsRead !== undefined && now - this.sensorsRead < SENSOR_REFRESH_MS) return;
     const listed = await this.daemon.request('ListSensors').catch(() => null);
     if (!listed) return;
-    this.systemSensors = tempSensors(listed);
+    this.systemSensors = tempSensors(listed, sensorKeysInUse(this.store.data));
     this.sensorsRead = now;
   }
 

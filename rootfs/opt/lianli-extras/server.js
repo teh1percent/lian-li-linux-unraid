@@ -18,7 +18,7 @@ const { History } = require('./lib/history');
 const { createLights } = require('./lib/lights');
 const { createMaintenance } = require('./lib/maintenance');
 const { createScreens } = require('./lib/screens');
-const { buildTemplates, screenFamilies } = require('./lib/templates');
+const { buildTemplates, screenFamilies, screenGroups } = require('./lib/templates');
 const { COLOR_KEYS, PRESETS, DEFAULT_LIMITS, isColor, validColors, pickColors, validLimits, themeExists, themeColors } = require('./lib/themes');
 const { readStats, selectStorage, writeStats } = require('./lib/unraid');
 
@@ -194,6 +194,7 @@ function createApp({ daemon, engine, store, options, history, auth }) {
       uploadDir: uploadDir(),
       templates: selectable().map(({ id, name }) => ({ id, name })),
       screenFamilies: screenFamilies(engine.getStats().volumes, engine.systemSensors),
+      screenGroups: screenGroups(engine.getStats().volumes, engine.systemSensors),
       themes: { keys: COLOR_KEYS, presets: PRESETS, defaultLimits: DEFAULT_LIMITS },
     };
     try {

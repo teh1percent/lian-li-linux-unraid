@@ -124,8 +124,9 @@ can reset again.
   your own file or a solid colour), brightness, rotation and colours. The Drives,
   Storage and Overview screens have a **Pool** choice on each LCD, so each screen can
   show a different pool, and new pools appear automatically. **System** screens show
-  CPU usage, memory usage, a system overview, or any temperature sensor (chosen on
-  each LCD; these gauges change colour at 70 and 85 °C). Files can be positioned and
+  CPU usage, memory usage, a system overview, or a temperature sensor (chosen on
+  each LCD; these gauges change colour at 70 and 85 °C). Per-core, Wi-Fi and extra
+  drive or network readings don't get their own screen, but are in the gauge list. Files can be positioned and
   zoomed, and videos can set their frame rate. **Startup image** sets what a screen
   shows at power-on. **Screen designs** is a drag-and-drop designer with text, gauges,
   bars, charts, clocks, images and video. **Template catalog** installs ready-made

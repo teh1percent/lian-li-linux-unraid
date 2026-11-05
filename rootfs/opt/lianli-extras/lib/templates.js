@@ -17,31 +17,77 @@ const SYSTEM_TEMP_DANGER = 85;
 const MAX_TEMP_SENSORS = 32;
 const CPU_SENSOR = /^(k10temp|coretemp|zenpower|cpu_thermal)$/i;
 const CPU_MAIN_LABEL = /^(tctl|tdie|package id 0)$/i;
+const CPU_MAIN_NAME = /: control temp$/i;
+const CORE_READING = /\bcore \d+$/i;
+const WIFI_SENSOR = /^(iwlwifi|ath\d|mt7|rtw|brcm)/i;
+// Extra readings from one device, hidden only when its main reading is listed too.
+const EXTRA_READINGS = [
+  [/: sensor \d+$/i, /: composite$/i],
+  [/: phy temperature$/i, /: mac temperature$/i],
+];
+const SCREEN_ID_SENSOR = /^unraid_temp_(\w+)$/;
+const MAX_TITLE = 16;
 
-// Temperature sensors worth a screen of their own, most useful first. Per-core
-// readings are left out: a big CPU has dozens, and they're still in the gauge list.
-function tempSensors(listed) {
-  const rank = ({ source }) => {
-    if (!CPU_SENSOR.test(source.name || '')) return 2;
-    return CPU_MAIN_LABEL.test(source.label || '') ? 0 : 1;
+const sensorName = (sensor) => sensor.display_name || `${sensor.sensor_name?.device_name || 'Sensor'}: ${sensor.sensor_name?.sensor_name || ''}`;
+const sensorKey = (source) => crypto.createHash('sha1').update(JSON.stringify(source)).digest('hex').slice(0, 10);
+
+function redundantSensor(sensor, names) {
+  const name = sensorName(sensor);
+  if (CORE_READING.test(name) || CORE_READING.test(sensor.source.label || '')) return true;
+  if (WIFI_SENSOR.test(sensor.source.name || '') || WIFI_SENSOR.test(name)) return true;
+  const device = `${name.split(':')[0]}:`;
+  return EXTRA_READINGS.some(([extra, main]) => extra.test(name) && names.some((other) => other.startsWith(device) && main.test(other)));
+}
+
+// What the gauge shows at the top, in words rather than raw labels like TEMP14.
+function sensorTitle(name, isMain) {
+  if (isMain) return 'CPU';
+  const [device, ...rest] = name.split(':');
+  const reading = rest.join(':').replace(/\b(temperature|temp)\b/gi, '').trim();
+  const generic = !reading || /^(composite|sensor \d+|temp\d+|mac|phy)$/i.test(reading);
+  const words = (generic ? device : reading).replace(/\b(ssd|nvme|\d+\s*[tg]b)\b/gi, ' ').trim().toUpperCase().split(/\s+/);
+  let title = words[0].slice(0, MAX_TITLE);
+  for (const word of words.slice(1)) {
+    if (`${title} ${word}`.length > MAX_TITLE) break;
+    title += ` ${word}`;
+  }
+  return title;
+}
+
+// Temperature sensors worth a screen of their own, most useful first. Per-core and
+// other redundant readings are left out, but stay in the gauge and fan curve lists.
+// A screen someone already uses is kept, so an update can't take it away from them.
+function tempSensors(listed, keepKeys = new Set()) {
+  const isMain = (sensor) => CPU_MAIN_LABEL.test(sensor.source.label || '') || CPU_MAIN_NAME.test(sensorName(sensor));
+  const rank = (sensor) => {
+    if (!CPU_SENSOR.test(sensor.source.name || '')) return 2;
+    return isMain(sensor) ? 0 : 1;
   };
-  return (listed || [])
-    .filter((sensor) => sensor.source && sensor.source.type !== 'command' && (sensor.unit === 'C' || sensor.unit === '°C'))
-    .filter((sensor) => !/^core \d+$/i.test(sensor.source.label || ''))
+  const temperatures = (listed || [])
+    .filter((sensor) => sensor.source && sensor.source.type !== 'command' && (sensor.unit === 'C' || sensor.unit === '°C'));
+  const names = temperatures.map(sensorName);
+  return temperatures
+    .filter((sensor) => keepKeys.has(sensorKey(toScreenSource(sensor.source))) || !redundantSensor(sensor, names))
     .map((sensor, index) => ({ sensor, index }))
     .sort((one, two) => rank(one.sensor) - rank(two.sensor) || one.index - two.index)
     .slice(0, MAX_TEMP_SENSORS)
     .map(({ sensor }) => {
       const source = toScreenSource(sensor.source);
-      const name = sensor.display_name || `${sensor.sensor_name?.device_name || 'Sensor'}: ${sensor.sensor_name?.sensor_name || ''}`;
+      const name = sensorName(sensor);
       return {
-        key: crypto.createHash('sha1').update(JSON.stringify(source)).digest('hex').slice(0, 10),
+        key: sensorKey(source),
         name,
-        title: String(sensor.source.label || sensor.sensor_name?.sensor_name || name).toUpperCase().slice(0, 16),
+        title: sensorTitle(name, rank(sensor) === 0),
         source,
         cpu: rank(sensor) < 2,
       };
     });
+}
+
+// The sensors behind the screens that LCDs and schedules are set to.
+function sensorKeysInUse(settings) {
+  const used = [...Object.values(settings.screens || {}), ...(settings.schedules || [])];
+  return new Set(used.map((item) => SCREEN_ID_SENSOR.exec(item.templateId || '')?.[1]).filter(Boolean));
 }
 
 const rgba = (color) => [...color, 255];
@@ -223,6 +269,19 @@ function screenFamilies(volumes = [], sensors = []) {
   ];
 }
 
+// How the previews are laid out on the Screens page.
+function screenGroups(volumes = [], sensors = []) {
+  const screen = (id, name) => ({ id, name });
+  return [
+    { id: 'storage', name: 'All storage', open: true, screens: [screen('unraid_drives', 'Drives'), screen('unraid_array', 'Storage'), screen('unraid_overview', 'Overview')] },
+    { id: 'system', name: 'System', open: true, screens: [screen('unraid_system', 'CPU'), screen('unraid_memory', 'Memory'), screen('unraid_sysinfo', 'Overview')] },
+    ...volumes.map(({ name, key }) => ({
+      id: `pool:${key}`, name, open: false, screens: [screen(`unraid_drives_${key}`, 'Drives'), screen(`unraid_volume_${key}`, 'Storage'), screen(`unraid_overview_${key}`, 'Overview')],
+    })),
+    ...(sensors.length ? [{ id: 'sensors', name: 'Temperature sensors', open: false, screens: sensors.map((sensor) => screen(`unraid_temp_${sensor.key}`, sensor.name)) }] : []),
+  ];
+}
+
 const themedId = (id, theme) => `${id}__${theme}`;
 
 // Everything the settings call for: each screen in the main theme, plus copies
@@ -263,4 +322,4 @@ async function installTemplates(daemon, wanted) {
   return true;
 }
 
-module.exports = { buildTemplates, wantedTemplates, installTemplates, contains, themedId, tempSensors, screenFamilies };
+module.exports = { buildTemplates, wantedTemplates, installTemplates, contains, themedId, tempSensors, sensorKey, sensorKeysInUse, screenFamilies, screenGroups };
