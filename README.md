@@ -22,7 +22,7 @@ Everything runs from a phone-friendly web dashboard, built on the open-source
 [Lian Li Linux](https://github.com/sgtaziz/lian-li-linux) project by
 [sgtaziz](https://github.com/sgtaziz).
 
-| | |
+| Feature | What it does |
 |---|---|
 | **Unraid stats on your LCDs** | Show drive temperatures, storage per pool, CPU, memory and system temperatures. Each LCD can show a different pool. |
 | **Fan curves that follow your drives** | Fans can follow the hottest drive, the average drive, one pool or a hardware sensor. Sleeping drives are never woken. |
@@ -46,7 +46,7 @@ Everything runs from a phone-friendly web dashboard, built on the open-source
   </tr>
   <tr>
     <td><img src="screenshots/designer.png" alt="The screen designer with a round gauge and a digital clock on a 400 by 400 LCD"></td>
-    <td align="center"><img src="screenshots/phone.jpg" alt="The Status page on a phone" width="240"></td>
+    <td align="center"><img src="screenshots/phone.jpg" alt="The Status page on a phone" width="150"></td>
   </tr>
   <tr>
     <td align="center"><b>Screen designer</b> for your own layouts</td>
