@@ -21,6 +21,10 @@ Not affiliated with Lian Li Industrial Co., Ltd.</Overview>
   <WebUI>http://[IP]:[PORT:6090]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/templates/lian-li-linux.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/icon.png</Icon>
+  <Screenshot>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/screenshots/status.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/screenshots/screens.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/screenshots/colours.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/teh1percent/lian-li-linux-unraid/main/screenshots/designer.png</Screenshot>
   <ExtraSearchTerms>lianli lian-li l-connect fan fans rgb lcd aio strimer hydroshift uni-fan</ExtraSearchTerms>
   <ExtraParams/>
   <PostArgs/>

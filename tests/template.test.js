@@ -36,6 +36,21 @@ test('the template has the fields reviewers look for', () => {
   assert.ok(![...xml.matchAll(/Description="([^"]*)"/g)].some((match) => /[<>]|&lt;/.test(match[1])), 'descriptions must not look like HTML');
 });
 
+test('every screenshot and local link on the page and in the listing exists', () => {
+  const listed = [...read('templates/lian-li-linux.xml').matchAll(/<Screenshot>([^<]+)<\/Screenshot>/g)].map((match) => localFile(match[1]));
+  assert.ok(listed.length > 0);
+  const readme = read('README.md');
+  const local = [...readme.matchAll(/src="([^"]+)"/g), ...readme.matchAll(/\]\((?!http|#)([^)]+)\)/g)].map((match) => match[1]);
+  assert.ok(local.length > 0);
+  for (const file of [...listed, ...local]) assert.ok(fs.existsSync(path.join(root, file)), file);
+});
+
+test('the page links only to headings that exist', () => {
+  const readme = read('README.md');
+  const anchors = new Set([...readme.matchAll(/^#{1,6} (.+)$/gm)].map((match) => match[1].toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s/g, '-')));
+  for (const [, anchor] of readme.matchAll(/\]\(#([^)]+)\)/g)) assert.ok(anchors.has(anchor), anchor);
+});
+
 test('the repository files for the profile exist', () => {
   const xml = read('ca_profile.xml');
   assert.ok(tag(xml, 'Profile').length > 20);
