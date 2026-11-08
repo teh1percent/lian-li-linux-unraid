@@ -1,6 +1,22 @@
+diff -ru a/crates/lianli-devices/src/crypto.rs b/crates/lianli-devices/src/crypto.rs
+--- a/crates/lianli-devices/src/crypto.rs	2026-11-08 03:35:55.707838500 -0800
++++ b/crates/lianli-devices/src/crypto.rs	2026-11-08 03:35:55.924326800 -0800
+@@ -240,6 +240,12 @@
+         self.build_winusb(CMD_CLEAR_PNG, &[])
+     }
+ 
++    /// Unraid packaging: ClearPng with a PNG payload, as L-Connect sends a
++    /// TL Flex panel once before its first frames.
++    pub fn clear_png_layer_header_winusb(&mut self, png_size: usize) -> Vec<u8> {
++        self.build_winusb(CMD_CLEAR_PNG, &(png_size as u32).to_be_bytes())
++    }
++
+     pub fn hide_show_frames_none_header_winusb(&mut self) -> Vec<u8> {
+         self.build_winusb(CMD_HIDE_SHOW_FRAMES, &[0u8; 32])
+     }
 diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/src/winusb/lcd/core.rs
 --- a/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 01:27:48.543902600 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 03:12:53.401009500 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 03:35:55.925831300 -0800
 @@ -234,8 +234,14 @@
  
      /// Negotiated block size, or the established transfer default before negotiation.
@@ -18,7 +34,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
      }
  
      /// True while an H.264 stream is feeding the panel.
-@@ -755,6 +761,147 @@
+@@ -755,6 +761,174 @@
          self.firmware.as_deref()
      }
  
@@ -81,6 +97,33 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
 +            Some(buf)
 +        })
 +        .as_deref()
++    }
++
++    /// Unraid packaging: L-Connect opens a TL Flex panel with ClearPng (0x67)
++    /// carrying a fully transparent 360x360 PNG. Firmware 2026072401 accepts
++    /// one JPEG without it, then hangs on the next. LIANLI_FLEX_UNLOCK=0 skips it.
++    pub(crate) fn flex_unlock(&mut self) {
++        if !self.is_flex()
++            || std::env::var("LIANLI_FLEX_UNLOCK").is_ok_and(|value| value.trim() == "0")
++        {
++            return;
++        }
++        let layer = image::ImageBuffer::from_pixel(360, 360, image::Rgba([0u8, 0, 0, 0]));
++        let mut png = Vec::new();
++        if let Err(error) = layer.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png) {
++            warn!("{}: cannot build the unlock layer: {error}", self.name);
++            return;
++        }
++        let header = self.builder.clear_png_layer_header_winusb(png.len());
++        let mut packet = Vec::with_capacity(512 + png.len());
++        packet.extend_from_slice(&header);
++        packet.extend_from_slice(&png);
++        match self.tx_write_full(&packet) {
++            Ok(_) => {
++                self.read_response("Flex unlock layer");
++            }
++            Err(error) => warn!("{}: unlock layer write failed: {error}", self.name),
++        }
 +    }
 +
 +    /// Unraid packaging: LIANLI_FLEX_REPLAY names a file of captured L-Connect
@@ -166,7 +209,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
      pub(crate) fn stop_playback(&mut self) -> Result<()> {
          let builder = &mut self.builder;
          let transport = &self.transport;
-@@ -1088,6 +1235,21 @@
+@@ -1088,6 +1262,21 @@
  
      pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<()> {
          self.stop_playback()?;
@@ -188,7 +231,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
          if frame.len() > self.screen.max_payload {
              bail!(
                  "frame payload {} exceeds LCD limit {}",
-@@ -1102,7 +1264,13 @@
+@@ -1102,7 +1291,13 @@
              self.builder.jpeg_header_winusb(frame.len())
          };
          let total = 512 + frame.len();
@@ -205,7 +248,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
  
 diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/src/winusb/lcd/mod.rs
 --- a/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 01:27:48.110133700 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 03:12:53.393501700 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 03:35:55.916298700 -0800
 @@ -296,9 +296,9 @@
              DeviceFamily::Vision9p2,
              "Vision 9.2\"",
@@ -220,8 +263,8 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/s
          )),
 diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/src/winusb/lcd/slv3.rs
 --- a/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 01:27:48.761212600 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 03:12:53.402512500 -0800
-@@ -52,6 +52,15 @@
++++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 03:35:55.925831300 -0800
+@@ -52,6 +52,16 @@
          self.core.reset_failure_state();
          self.core.stop_playback()?;
          self.core.read_firmware();
@@ -231,13 +274,14 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/
 +        if self.core.is_flex() && !flex_setting("LIANLI_FLEX_FULL_INIT") {
 +            self.core.flex_replay();
 +            self.core.clear_layers();
++            self.core.flex_unlock();
 +            self.core.initialized = true;
 +            return Ok(());
 +        }
          self.core.set_frame_rate(SLV3_FRAME_RATE)?;
          self.core.query_h264_block();
          let sync = self.core.builder_mut().sync_clock_header_winusb(2);
-@@ -68,6 +77,10 @@
+@@ -68,6 +78,10 @@
  const READ_TIMEOUT: Duration = Duration::from_millis(2_000);
  const SLV3_FRAME_RATE: u8 = 120;
  
@@ -248,7 +292,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/
  impl WinUsbLcd for Slv3WinUsbLcd {
      fn packet_builder(&mut self) -> &mut crate::crypto::PacketBuilder {
          self.core.builder_mut()
-@@ -106,6 +119,13 @@
+@@ -106,6 +120,13 @@
          self.core.send_frame_verified(frame)
      }
      fn set_brightness_val(&mut self, brightness: u8) -> Result<()> {
@@ -264,7 +308,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/
      fn switch_to_desktop_mode(&mut self) -> Result<()> {
 diff -ru a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-devices/src/winusb/wired_receiver.rs
 --- a/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 01:27:48.983461500 -0800
-+++ b/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 03:12:53.398012400 -0800
++++ b/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 03:35:55.920299000 -0800
 @@ -35,6 +35,8 @@
  const CMD_GET_VER: u8 = 0x10;
  const CMD_STREAM_RGB: u8 = 0x11;
@@ -351,7 +395,7 @@ diff -ru a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-de
  
 diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
 --- a/crates/lianli-media/src/common.rs	2026-11-08 01:27:48.327908600 -0800
-+++ b/crates/lianli-media/src/common.rs	2026-11-08 03:12:53.393501700 -0800
++++ b/crates/lianli-media/src/common.rs	2026-11-08 03:35:55.916298700 -0800
 @@ -92,13 +92,24 @@
      let buf = if screen.png {
          encode_png_bytes(&tj_image)?
@@ -386,7 +430,7 @@ diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
          return Err(MediaError::PayloadTooLarge { size: buf.len() });
 diff -ru a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
 --- a/crates/lianli-shared/src/screen.rs	2026-11-08 01:27:47.888486400 -0800
-+++ b/crates/lianli-shared/src/screen.rs	2026-11-08 03:12:53.397009200 -0800
++++ b/crates/lianli-shared/src/screen.rs	2026-11-08 03:35:55.919297000 -0800
 @@ -144,11 +144,33 @@
          DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
          DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
