@@ -1,6 +1,6 @@
-diff -ru a/crates/lianli-devices/src/crypto.rs b/crates/lianli-devices/src/crypto.rs
+diff -ruN a/crates/lianli-devices/src/crypto.rs b/crates/lianli-devices/src/crypto.rs
 --- a/crates/lianli-devices/src/crypto.rs	2026-11-08 03:35:55.707838500 -0800
-+++ b/crates/lianli-devices/src/crypto.rs	2026-11-08 03:55:33.737673200 -0800
++++ b/crates/lianli-devices/src/crypto.rs	2026-11-08 10:55:32.507292200 -0800
 @@ -240,6 +240,12 @@
          self.build_winusb(CMD_CLEAR_PNG, &[])
      }
@@ -14,27 +14,27 @@ diff -ru a/crates/lianli-devices/src/crypto.rs b/crates/lianli-devices/src/crypt
      pub fn hide_show_frames_none_header_winusb(&mut self) -> Vec<u8> {
          self.build_winusb(CMD_HIDE_SHOW_FRAMES, &[0u8; 32])
      }
-diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/src/winusb/lcd/core.rs
+diff -ruN a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/src/winusb/lcd/core.rs
 --- a/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 01:27:48.543902600 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 03:55:33.739674300 -0800
-@@ -234,8 +234,14 @@
++++ b/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 10:55:32.509297300 -0800
+@@ -70,6 +70,16 @@
+     unsafe_cmds
+ }
  
-     /// Negotiated block size, or the established transfer default before negotiation.
-     pub fn h264_chunk_size(&self) -> usize {
--        self.negotiated_h264_chunk_size()
--            .unwrap_or(DEFAULT_H264_CHUNK_SIZE)
-+        let size = self
-+            .negotiated_h264_chunk_size()
-+            .unwrap_or(DEFAULT_H264_CHUNK_SIZE);
-+        // Unraid packaging: LIANLI_LCD_H264_CHUNK caps the block size for testing.
-+        std::env::var("LIANLI_LCD_H264_CHUNK")
-+            .ok()
-+            .and_then(|value| value.trim().parse::<usize>().ok())
-+            .map_or(size, |cap| size.min(cap.max(4096)))
-     }
- 
-     /// True while an H.264 stream is feeding the panel.
-@@ -755,6 +761,235 @@
++/// Unraid packaging: a fully transparent RGBA PNG.
++fn transparent_png(width: u32, height: u32) -> Option<Vec<u8>> {
++    let layer = image::ImageBuffer::from_pixel(width, height, image::Rgba([0u8, 0, 0, 0]));
++    let mut buf = Vec::new();
++    layer
++        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
++        .ok()?;
++    Some(buf)
++}
++
+ fn remaining_timeout(deadline: Instant, maximum: Duration) -> Result<Duration> {
+     let remaining = deadline.saturating_duration_since(Instant::now());
+     anyhow::ensure!(!remaining.is_zero(), "H2 transaction deadline expired");
+@@ -755,6 +765,84 @@
          self.firmware.as_deref()
      }
  
@@ -43,42 +43,9 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
 +        self.name.contains("Flex")
 +    }
 +
-+    /// Unraid packaging: LIANLI_FLEX_REENCODE=1 re-encodes Flex frames with the
-+    /// image crate encoder instead of turbojpeg (a test option; it did not help).
-+    fn flex_reencode(&self, frame: &[u8]) -> Option<Vec<u8>> {
-+        if !self.is_flex()
-+            || self.screen.png
-+            || !std::env::var("LIANLI_FLEX_REENCODE").is_ok_and(|value| value.trim() == "1")
-+        {
-+            return None;
-+        }
-+        let decoded = match image::load_from_memory_with_format(frame, image::ImageFormat::Jpeg) {
-+            Ok(decoded) => decoded.to_rgb8(),
-+            Err(error) => {
-+                debug!("{}: cannot decode frame to re-encode it: {error}", self.name);
-+                return None;
-+            }
-+        };
-+        let mut out = Vec::with_capacity(frame.len() * 2);
-+        {
-+            let mut encoder =
-+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, self.screen.jpeg_quality);
-+            if let Err(error) = encoder.encode_image(&decoded) {
-+                debug!("{}: cannot re-encode frame: {error}", self.name);
-+                return None;
-+            }
-+        }
-+        if out.len() > self.screen.max_payload {
-+            debug!("{}: re-encoded frame too large ({} bytes), sending original", self.name, out.len());
-+            return None;
-+        }
-+        Some(out)
-+    }
-+
-+    /// Unraid packaging: L-Connect pushes a PNG overlay layer right before every
-+    /// JPEG it sends a TL Flex panel. The firmware acks a JPEG that follows a PNG
-+    /// and hangs on one that does not, so send a transparent PNG layer first
-+    /// unless LIANLI_FLEX_PNG_LAYER=0.
++    /// Unraid packaging: L-Connect pushes a transparent PNG overlay layer right
++    /// before every JPEG it sends a TL Flex panel. Do the same unless
++    /// LIANLI_FLEX_PNG_LAYER=0.
 +    fn flex_png_layer(&self) -> Option<&'static [u8]> {
 +        static PNG: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
 +        if !self.is_flex()
@@ -88,63 +55,21 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
 +            return None;
 +        }
 +        let (width, height) = (self.screen.width, self.screen.height);
-+        PNG.get_or_init(|| {
-+            let layer = image::ImageBuffer::from_pixel(width, height, image::Rgba([0u8, 0, 0, 0]));
-+            let mut buf = Vec::new();
-+            layer
-+                .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-+                .ok()?;
-+            Some(buf)
-+        })
-+        .as_deref()
++        PNG.get_or_init(|| transparent_png(width, height)).as_deref()
 +    }
 +
-+    /// Unraid packaging: L-Connect opens a TL Flex panel with ClearPng (0x67)
-+    /// carrying a fully transparent 360x360 PNG. Firmware 2026072401 accepts
-+    /// one JPEG without it, then hangs on the next. LIANLI_FLEX_UNLOCK=0 skips it.
-+    pub(crate) fn flex_unlock(&mut self) {
-+        if !self.is_flex()
-+            || std::env::var("LIANLI_FLEX_UNLOCK").is_ok_and(|value| value.trim() == "0")
-+        {
-+            return;
-+        }
-+        let layer = image::ImageBuffer::from_pixel(360, 360, image::Rgba([0u8, 0, 0, 0]));
-+        let mut png = Vec::new();
-+        if let Err(error) = layer.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png) {
-+            warn!("{}: cannot build the unlock layer: {error}", self.name);
-+            return;
-+        }
-+        let header = self.builder.clear_png_layer_header_winusb(png.len());
-+        let mut packet = Vec::with_capacity(512 + png.len());
-+        packet.extend_from_slice(&header);
-+        packet.extend_from_slice(&png);
-+        match self.tx_write_full(&packet) {
-+            Ok(_) => {
-+                self.read_response("Flex unlock layer");
-+            }
-+            Err(error) => warn!("{}: unlock layer write failed: {error}", self.name),
-+        }
-+    }
-+
-+    /// Unraid packaging: L-Connect opens a TL Flex panel with three packets sent
-+    /// back to back before it reads any reply: a transparent 400x400 PNG layer,
-+    /// a black baseline 4:2:0 JPEG, and ClearPng carrying a transparent 360x360
-+    /// PNG. Send the same opening in place of clear_layers. Returns false when
-+    /// it is turned off with LIANLI_FLEX_OPEN=0 or could not be built.
++    /// Unraid packaging: TL Flex firmware 2026072401 hangs on its first frames
++    /// unless it is opened the way L-Connect opens it: three packets sent back
++    /// to back before any reply is read - a transparent full-size PNG layer, a
++    /// black baseline 4:2:0 JPEG, and ClearPng (0x67) carrying a transparent
++    /// 360x360 PNG. The panel acks the first two; ClearPng gets no reply.
++    /// Returns false when turned off with LIANLI_FLEX_OPEN=0 or not buildable.
 +    pub(crate) fn flex_open_sequence(&mut self) -> bool {
 +        if !self.is_flex()
 +            || std::env::var("LIANLI_FLEX_OPEN").is_ok_and(|value| value.trim() == "0")
 +        {
 +            return false;
 +        }
-+        let png = |size: u32| -> Option<Vec<u8>> {
-+            let layer = image::ImageBuffer::from_pixel(size, size, image::Rgba([0u8, 0, 0, 0]));
-+            let mut buf = Vec::new();
-+            layer
-+                .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-+                .ok()?;
-+            Some(buf)
-+        };
 +        let (width, height) = (self.screen.width as usize, self.screen.height as usize);
 +        let black = vec![0u8; width * height * 3];
 +        let jpeg = turbojpeg::compress(
@@ -159,7 +84,11 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
 +            turbojpeg::Subsamp::Sub2x2,
 +        )
 +        .map(|buf| buf.to_vec());
-+        let (Some(layer), Some(unlock), Ok(jpeg)) = (png(self.screen.width), png(360), jpeg) else {
++        let (Some(layer), Some(unlock), Ok(jpeg)) = (
++            transparent_png(self.screen.width, self.screen.height),
++            transparent_png(360, 360),
++            jpeg,
++        ) else {
 +            warn!("{}: cannot build the opening sequence", self.name);
 +            return false;
 +        };
@@ -179,7 +108,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
 +                return true;
 +            }
 +        }
-+        for index in 0..packets.len() {
++        for index in 0..2 {
 +            if self.read_response(&format!("Flex opening packet {index}")).is_none() {
 +                break;
 +            }
@@ -187,96 +116,13 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
 +        true
 +    }
 +
-+    /// Unraid packaging: LIANLI_FLEX_REPLAY names a file of captured L-Connect
-+    /// packets ([u32 BE length][u32 BE ms offset][bytes]...). They are sent
-+    /// verbatim with the captured timing, to tell a protocol problem from a
-+    /// USB one.
-+    pub(crate) fn flex_replay(&mut self) {
-+        let Ok(path) = std::env::var("LIANLI_FLEX_REPLAY") else {
-+            return;
-+        };
-+        let data = match std::fs::read(path.trim()) {
-+            Ok(data) => data,
-+            Err(error) => {
-+                warn!("{}: cannot read replay file {path}: {error}", self.name);
-+                return;
-+            }
-+        };
-+        info!("{}: replaying {} bytes of captured packets", self.name, data.len());
-+        let start = Instant::now();
-+        let mut offset = 0usize;
-+        let mut sent = 0usize;
-+        let mut acks = 0usize;
-+        let mut reply = [0u8; 512];
-+        while offset + 8 <= data.len() {
-+            let len = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize;
-+            let at = u32::from_be_bytes([data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]]);
-+            offset += 8;
-+            if offset + len > data.len() {
-+                warn!("{}: replay file is truncated", self.name);
-+                break;
-+            }
-+            let packet = &data[offset..offset + len];
-+            offset += len;
-+            if let Some(wait) = Duration::from_millis(u64::from(at)).checked_sub(start.elapsed()) {
-+                std::thread::sleep(wait);
-+            }
-+            if let Err(error) = self.tx_write_full(packet) {
-+                warn!("{}: replay packet {sent} ({len} bytes) write failed: {error}", self.name);
-+                break;
-+            }
-+            sent += 1;
-+            while let Ok(n) = self.transport.lock().read(&mut reply, Duration::from_millis(5)) {
-+                if n == 0 {
-+                    break;
-+                }
-+                acks += 1;
-+                debug!("{}: replay ack {:02x?}", self.name, &reply[..n.min(8)]);
-+            }
-+        }
-+        let until = Instant::now() + Duration::from_secs(2);
-+        while Instant::now() < until {
-+            if let Ok(n) = self.transport.lock().read(&mut reply, Duration::from_millis(200)) {
-+                if n > 0 {
-+                    acks += 1;
-+                    debug!("{}: replay ack {:02x?}", self.name, &reply[..n.min(8)]);
-+                }
-+            }
-+        }
-+        info!("{}: replay sent {sent} packets, got {acks} acks", self.name);
-+    }
-+
-+    /// Unraid packaging: LIANLI_FLEX_DUMP_DIR saves the first five Flex frames
-+    /// exactly as they are sent, for comparing with what L-Connect sends.
-+    fn flex_dump(&self, frame: &[u8]) {
-+        static DUMPED: AtomicUsize = AtomicUsize::new(0);
-+        if !self.is_flex() {
-+            return;
-+        }
-+        let Ok(dir) = std::env::var("LIANLI_FLEX_DUMP_DIR") else {
-+            return;
-+        };
-+        let index = DUMPED.fetch_add(1, Ordering::Relaxed);
-+        if index >= 5 {
-+            return;
-+        }
-+        let path = std::path::Path::new(dir.trim()).join(format!("flex-frame-{index}.jpg"));
-+        match std::fs::write(&path, frame) {
-+            Ok(()) => info!("{}: saved frame to {}", self.name, path.display()),
-+            Err(error) => warn!("{}: cannot save frame to {}: {error}", self.name, path.display()),
-+        }
-+    }
-+
      pub(crate) fn stop_playback(&mut self) -> Result<()> {
          let builder = &mut self.builder;
          let transport = &self.transport;
-@@ -1088,6 +1323,21 @@
+@@ -1088,6 +1176,18 @@
  
      pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<()> {
          self.stop_playback()?;
-+        let reencoded = self.flex_reencode(frame);
-+        let frame: &[u8] = reencoded.as_deref().unwrap_or(frame);
-+        self.flex_dump(frame);
 +        if let Some(png) = self.flex_png_layer() {
 +            let header = self.builder.png_header_winusb(png.len());
 +            let mut packet = Vec::with_capacity(512 + png.len());
@@ -292,24 +138,9 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
          if frame.len() > self.screen.max_payload {
              bail!(
                  "frame payload {} exceeds LCD limit {}",
-@@ -1102,7 +1352,13 @@
-             self.builder.jpeg_header_winusb(frame.len())
-         };
-         let total = 512 + frame.len();
--        let mut packet = vec![0u8; total];
-+        // Unraid packaging: LIANLI_FLEX_PAD_FRAMES=1 pads TL Flex frames to the
-+        // wireless LCD's fixed 102,400-byte transfer. L-Connect does not pad.
-+        let padded = self.is_flex()
-+            && total <= 102_400
-+            && std::env::var("LIANLI_FLEX_PAD_FRAMES").is_ok_and(|value| value.trim() == "1");
-+        let mut packet = vec![0u8; if padded { 102_400 } else { total }];
-+        debug!("{}: sending {} byte frame (padded: {padded})", self.name, frame.len());
-         packet[..512].copy_from_slice(&header);
-         packet[512..total].copy_from_slice(frame);
- 
-diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/src/winusb/lcd/mod.rs
+diff -ruN a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/src/winusb/lcd/mod.rs
 --- a/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 01:27:48.110133700 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 03:55:33.729119200 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 10:55:32.504785200 -0800
 @@ -296,9 +296,9 @@
              DeviceFamily::Vision9p2,
              "Vision 9.2\"",
@@ -322,21 +153,19 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/s
              DeviceFamily::SlInfFlexLcd,
              "SL Infinity Flex LCD",
          )),
-diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/src/winusb/lcd/slv3.rs
+diff -ruN a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/src/winusb/lcd/slv3.rs
 --- a/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 01:27:48.761212600 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 03:55:33.740674100 -0800
-@@ -52,6 +52,18 @@
++++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 10:55:32.509297300 -0800
+@@ -52,6 +52,16 @@
          self.core.reset_failure_state();
          self.core.stop_playback()?;
          self.core.read_firmware();
-+        // Unraid packaging: L-Connect sends a TL Flex panel only GetVer before it
-+        // starts pushing PNG and JPEG layers. Newer Flex firmware stops answering
-+        // USB after the extra setup below, so skip it unless LIANLI_FLEX_FULL_INIT=1.
++        // Unraid packaging: L-Connect sends a TL Flex panel only GetVer and its
++        // opening sequence before it starts pushing frames. Newer Flex firmware
++        // hangs after the setup below, so skip it unless LIANLI_FLEX_FULL_INIT=1.
 +        if self.core.is_flex() && !flex_setting("LIANLI_FLEX_FULL_INIT") {
-+            self.core.flex_replay();
 +            if !self.core.flex_open_sequence() {
 +                self.core.clear_layers();
-+                self.core.flex_unlock();
 +            }
 +            self.core.initialized = true;
 +            return Ok(());
@@ -344,7 +173,7 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/
          self.core.set_frame_rate(SLV3_FRAME_RATE)?;
          self.core.query_h264_block();
          let sync = self.core.builder_mut().sync_clock_header_winusb(2);
-@@ -68,6 +80,10 @@
+@@ -68,6 +78,10 @@
  const READ_TIMEOUT: Duration = Duration::from_millis(2_000);
  const SLV3_FRAME_RATE: u8 = 120;
  
@@ -355,13 +184,12 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/
  impl WinUsbLcd for Slv3WinUsbLcd {
      fn packet_builder(&mut self) -> &mut crate::crypto::PacketBuilder {
          self.core.builder_mut()
-@@ -106,6 +122,13 @@
+@@ -106,6 +120,12 @@
          self.core.send_frame_verified(frame)
      }
      fn set_brightness_val(&mut self, brightness: u8) -> Result<()> {
-+        // Unraid packaging: L-Connect never sends Brightness to a TL Flex panel,
-+        // and newer firmware stops answering after it. LIANLI_FLEX_BRIGHTNESS=1
-+        // sends it anyway.
++        // Unraid packaging: L-Connect never sends Brightness to a TL Flex panel.
++        // LIANLI_FLEX_BRIGHTNESS=1 sends it anyway.
 +        if self.core.is_flex() && !flex_setting("LIANLI_FLEX_BRIGHTNESS") {
 +            tracing::debug!("Skipping Brightness {brightness} on a Flex panel");
 +            return Ok(());
@@ -369,9 +197,9 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/
          self.core.set_brightness_val(brightness)
      }
      fn switch_to_desktop_mode(&mut self) -> Result<()> {
-diff -ru a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-devices/src/winusb/wired_receiver.rs
+diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-devices/src/winusb/wired_receiver.rs
 --- a/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 01:27:48.983461500 -0800
-+++ b/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 03:55:33.733165400 -0800
++++ b/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 10:55:32.505784900 -0800
 @@ -35,6 +35,8 @@
  const CMD_GET_VER: u8 = 0x10;
  const CMD_STREAM_RGB: u8 = 0x11;
@@ -456,9 +284,9 @@ diff -ru a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-de
          let name = ctrl.params().name.to_string();
          let firmware = ctrl.read_firmware().ok();
  
-diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
+diff -ruN a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
 --- a/crates/lianli-media/src/common.rs	2026-11-08 01:27:48.327908600 -0800
-+++ b/crates/lianli-media/src/common.rs	2026-11-08 03:55:33.729119200 -0800
++++ b/crates/lianli-media/src/common.rs	2026-11-08 10:55:32.505784900 -0800
 @@ -92,13 +92,24 @@
      let buf = if screen.png {
          encode_png_bytes(&tj_image)?
@@ -491,10 +319,10 @@ diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
      };
      if buf.len() > screen.max_payload {
          return Err(MediaError::PayloadTooLarge { size: buf.len() });
-diff -ru a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
+diff -ruN a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
 --- a/crates/lianli-shared/src/screen.rs	2026-11-08 01:27:47.888486400 -0800
-+++ b/crates/lianli-shared/src/screen.rs	2026-11-08 03:55:33.732118600 -0800
-@@ -144,11 +144,33 @@
++++ b/crates/lianli-shared/src/screen.rs	2026-11-08 10:55:32.508300200 -0800
+@@ -144,11 +144,32 @@
          DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
          DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
          DeviceFamily::Vision9p2 => Some(ScreenInfo::VISION_9P2),
@@ -519,8 +347,7 @@ diff -ru a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.
 +            .map_or(85, |quality| quality.clamp(10, 100) as u8);
 +        screen.max_payload = setting("LIANLI_FLEX_MAX_PAYLOAD")
 +            .map_or(102_400 - 512, |size| size.clamp(16_384, 512_000));
-+        // L-Connect never lets the panel go quiet: it streams frames, or polls
-+        // GetVer once a second. Re-send unchanged sensor frames to do the same.
++        // L-Connect never lets the panel go quiet, so re-send unchanged frames.
 +        screen.needs_keepalive = true;
 +        screen
 +    }
