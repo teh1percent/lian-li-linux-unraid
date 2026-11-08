@@ -1,0 +1,121 @@
+diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/src/winusb/lcd/core.rs
+--- a/crates/lianli-devices/src/winusb/lcd/core.rs
++++ b/crates/lianli-devices/src/winusb/lcd/core.rs
+@@ -234,8 +234,14 @@
+ 
+     /// Negotiated block size, or the established transfer default before negotiation.
+     pub fn h264_chunk_size(&self) -> usize {
+-        self.negotiated_h264_chunk_size()
+-            .unwrap_or(DEFAULT_H264_CHUNK_SIZE)
++        let size = self
++            .negotiated_h264_chunk_size()
++            .unwrap_or(DEFAULT_H264_CHUNK_SIZE);
++        // Unraid packaging: LIANLI_LCD_H264_CHUNK caps the block size for testing.
++        std::env::var("LIANLI_LCD_H264_CHUNK")
++            .ok()
++            .and_then(|value| value.trim().parse::<usize>().ok())
++            .map_or(size, |cap| size.min(cap.max(4096)))
+     }
+ 
+     /// True while an H.264 stream is feeding the panel.
+@@ -1102,7 +1108,14 @@
+             self.builder.jpeg_header_winusb(frame.len())
+         };
+         let total = 512 + frame.len();
+-        let mut packet = vec![0u8; total];
++        // Unraid packaging: the vendor fan-LCD protocol sends every frame as a
++        // fixed 102,400-byte transfer. TL Flex screens run that firmware, so
++        // pad their frames the same way unless LIANLI_FLEX_PAD_FRAMES=0.
++        let padded = self.name.contains("Flex")
++            && total <= 102_400
++            && std::env::var("LIANLI_FLEX_PAD_FRAMES").map_or(true, |value| value.trim() != "0");
++        let mut packet = vec![0u8; if padded { 102_400 } else { total }];
++        debug!("{}: sending {} byte frame (padded: {padded})", self.name, frame.len());
+         packet[..512].copy_from_slice(&header);
+         packet[512..total].copy_from_slice(frame);
+ 
+diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/src/winusb/lcd/mod.rs
+--- a/crates/lianli-devices/src/winusb/lcd/mod.rs
++++ b/crates/lianli-devices/src/winusb/lcd/mod.rs
+@@ -296,9 +296,9 @@
+             DeviceFamily::Vision9p2,
+             "Vision 9.2\"",
+         )),
+-        0xA018 => Some((ScreenInfo::FLEX_LCD, DeviceFamily::TlFlexLcd, "TL Flex LCD")),
++        0xA018 => Some((ScreenInfo::flex_lcd(), DeviceFamily::TlFlexLcd, "TL Flex LCD")),
+         0xA019 => Some((
+-            ScreenInfo::FLEX_LCD,
++            ScreenInfo::flex_lcd(),
+             DeviceFamily::SlInfFlexLcd,
+             "SL Infinity Flex LCD",
+         )),
+diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
+--- a/crates/lianli-media/src/common.rs
++++ b/crates/lianli-media/src/common.rs
+@@ -92,13 +92,24 @@
+     let buf = if screen.png {
+         encode_png_bytes(&tj_image)?
+     } else {
+-        turbojpeg::compress(
+-            tj_image,
+-            screen.jpeg_quality as i32,
+-            turbojpeg::Subsamp::Sub2x2,
+-        )
+-        .map_err(|e| MediaError::ImageError(format!("turbojpeg encode: {e}")))?
+-        .to_vec()
++        // Unraid packaging: step the quality down until the frame fits the panel.
++        let mut quality = screen.jpeg_quality as i32;
++        loop {
++            let image = turbojpeg::Image {
++                pixels: tj_image.pixels,
++                width: tj_image.width,
++                pitch: tj_image.pitch,
++                height: tj_image.height,
++                format: tj_image.format.clone(),
++            };
++            let encoded = turbojpeg::compress(image, quality, turbojpeg::Subsamp::Sub2x2)
++                .map_err(|e| MediaError::ImageError(format!("turbojpeg encode: {e}")))?
++                .to_vec();
++            if encoded.len() <= screen.max_payload || quality <= 30 {
++                break encoded;
++            }
++            quality -= 10;
++        }
+     };
+     if buf.len() > screen.max_payload {
+         return Err(MediaError::PayloadTooLarge { size: buf.len() });
+diff -ru a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
+--- a/crates/lianli-shared/src/screen.rs
++++ b/crates/lianli-shared/src/screen.rs
+@@ -144,11 +144,30 @@
+         DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
+         DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
+         DeviceFamily::Vision9p2 => Some(ScreenInfo::VISION_9P2),
+-        DeviceFamily::TlFlexLcd | DeviceFamily::SlInfFlexLcd => Some(ScreenInfo::FLEX_LCD),
++        DeviceFamily::TlFlexLcd | DeviceFamily::SlInfFlexLcd => Some(ScreenInfo::flex_lcd()),
+         _ => None,
+     }
+ }
+ 
++/// Unraid packaging: the fan-LCD firmware on TL Flex screens shares the wireless
++/// LCD's 100 KiB frame buffer, so frames are kept under it. Both limits can be
++/// changed with LIANLI_FLEX_JPEG_QUALITY and LIANLI_FLEX_MAX_PAYLOAD.
++impl ScreenInfo {
++    pub fn flex_lcd() -> Self {
++        let setting = |name: &str| {
++            std::env::var(name)
++                .ok()
++                .and_then(|value| value.trim().parse::<usize>().ok())
++        };
++        let mut screen = Self::FLEX_LCD;
++        screen.jpeg_quality = setting("LIANLI_FLEX_JPEG_QUALITY")
++            .map_or(85, |quality| quality.clamp(10, 100) as u8);
++        screen.max_payload = setting("LIANLI_FLEX_MAX_PAYLOAD")
++            .map_or(102_400 - 512, |size| size.clamp(16_384, 512_000));
++        screen
++    }
++}
++
+ #[derive(Debug, Clone, Copy)]
+ pub struct ScreenPreset {
+     pub label: &'static str,
