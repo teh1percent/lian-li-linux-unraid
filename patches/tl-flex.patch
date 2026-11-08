@@ -18,17 +18,28 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
      }
  
      /// True while an H.264 stream is feeding the panel.
-@@ -1102,7 +1108,14 @@
+@@ -755,6 +761,11 @@
+         self.firmware.as_deref()
+     }
+ 
++    /// Unraid packaging: TL Flex and SL Infinity Flex panels.
++    pub(crate) fn is_flex(&self) -> bool {
++        self.name.contains("Flex")
++    }
++
+     pub(crate) fn stop_playback(&mut self) -> Result<()> {
+         let builder = &mut self.builder;
+         let transport = &self.transport;
+@@ -1102,7 +1113,13 @@
              self.builder.jpeg_header_winusb(frame.len())
          };
          let total = 512 + frame.len();
 -        let mut packet = vec![0u8; total];
-+        // Unraid packaging: the vendor fan-LCD protocol sends every frame as a
-+        // fixed 102,400-byte transfer. TL Flex screens run that firmware, so
-+        // pad their frames the same way unless LIANLI_FLEX_PAD_FRAMES=0.
-+        let padded = self.name.contains("Flex")
++        // Unraid packaging: LIANLI_FLEX_PAD_FRAMES=1 pads TL Flex frames to the
++        // wireless LCD's fixed 102,400-byte transfer. L-Connect does not pad.
++        let padded = self.is_flex()
 +            && total <= 102_400
-+            && std::env::var("LIANLI_FLEX_PAD_FRAMES").map_or(true, |value| value.trim() != "0");
++            && std::env::var("LIANLI_FLEX_PAD_FRAMES").is_ok_and(|value| value.trim() == "1");
 +        let mut packet = vec![0u8; if padded { 102_400 } else { total }];
 +        debug!("{}: sending {} byte frame (padded: {padded})", self.name, frame.len());
          packet[..512].copy_from_slice(&header);
@@ -49,6 +60,49 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/s
              DeviceFamily::SlInfFlexLcd,
              "SL Infinity Flex LCD",
          )),
+diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/src/winusb/lcd/slv3.rs
+--- a/crates/lianli-devices/src/winusb/lcd/slv3.rs
++++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs
+@@ -52,6 +52,14 @@
+         self.core.reset_failure_state();
+         self.core.stop_playback()?;
+         self.core.read_firmware();
++        // Unraid packaging: L-Connect sends a TL Flex panel only GetVer before it
++        // starts pushing PNG and JPEG layers. Newer Flex firmware stops answering
++        // USB after the extra setup below, so skip it unless LIANLI_FLEX_FULL_INIT=1.
++        if self.core.is_flex() && !flex_setting("LIANLI_FLEX_FULL_INIT") {
++            self.core.clear_layers();
++            self.core.initialized = true;
++            return Ok(());
++        }
+         self.core.set_frame_rate(SLV3_FRAME_RATE)?;
+         self.core.query_h264_block();
+         let sync = self.core.builder_mut().sync_clock_header_winusb(2);
+@@ -68,6 +76,10 @@
+ const READ_TIMEOUT: Duration = Duration::from_millis(2_000);
+ const SLV3_FRAME_RATE: u8 = 120;
+ 
++fn flex_setting(name: &str) -> bool {
++    std::env::var(name).is_ok_and(|value| value.trim() == "1")
++}
++
+ impl WinUsbLcd for Slv3WinUsbLcd {
+     fn packet_builder(&mut self) -> &mut crate::crypto::PacketBuilder {
+         self.core.builder_mut()
+@@ -106,6 +118,13 @@
+         self.core.send_frame_verified(frame)
+     }
+     fn set_brightness_val(&mut self, brightness: u8) -> Result<()> {
++        // Unraid packaging: L-Connect never sends Brightness to a TL Flex panel,
++        // and newer firmware stops answering after it. LIANLI_FLEX_BRIGHTNESS=1
++        // sends it anyway.
++        if self.core.is_flex() && !flex_setting("LIANLI_FLEX_BRIGHTNESS") {
++            tracing::debug!("Skipping Brightness {brightness} on a Flex panel");
++            return Ok(());
++        }
+         self.core.set_brightness_val(brightness)
+     }
+     fn switch_to_desktop_mode(&mut self) -> Result<()> {
 diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
 --- a/crates/lianli-media/src/common.rs
 +++ b/crates/lianli-media/src/common.rs
@@ -87,7 +141,7 @@ diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
 diff -ru a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
 --- a/crates/lianli-shared/src/screen.rs
 +++ b/crates/lianli-shared/src/screen.rs
-@@ -144,11 +144,30 @@
+@@ -144,11 +144,33 @@
          DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
          DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
          DeviceFamily::Vision9p2 => Some(ScreenInfo::VISION_9P2),
@@ -112,6 +166,9 @@ diff -ru a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.
 +            .map_or(85, |quality| quality.clamp(10, 100) as u8);
 +        screen.max_payload = setting("LIANLI_FLEX_MAX_PAYLOAD")
 +            .map_or(102_400 - 512, |size| size.clamp(16_384, 512_000));
++        // L-Connect never lets the panel go quiet: it streams frames, or polls
++        // GetVer once a second. Re-send unchanged sensor frames to do the same.
++        screen.needs_keepalive = true;
 +        screen
 +    }
 +}
