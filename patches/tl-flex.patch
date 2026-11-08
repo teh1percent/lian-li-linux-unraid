@@ -1,6 +1,6 @@
 diff -ruN a/crates/lianli-daemon/src/service/runtime.rs b/crates/lianli-daemon/src/service/runtime.rs
 --- a/crates/lianli-daemon/src/service/runtime.rs	2026-11-08 11:03:18.052253600 -0800
-+++ b/crates/lianli-daemon/src/service/runtime.rs	2026-11-08 11:03:18.161451300 -0800
++++ b/crates/lianli-daemon/src/service/runtime.rs	2026-11-08 11:41:17.967485400 -0800
 @@ -952,7 +952,25 @@
      }
  
@@ -30,7 +30,7 @@ diff -ruN a/crates/lianli-daemon/src/service/runtime.rs b/crates/lianli-daemon/s
                  anyhow::bail!("LCD busy. Brightness change was not accepted.")
 diff -ruN a/crates/lianli-devices/src/crypto.rs b/crates/lianli-devices/src/crypto.rs
 --- a/crates/lianli-devices/src/crypto.rs	2026-11-08 03:35:55.707838500 -0800
-+++ b/crates/lianli-devices/src/crypto.rs	2026-11-08 11:03:18.156453100 -0800
++++ b/crates/lianli-devices/src/crypto.rs	2026-11-08 11:41:17.963979300 -0800
 @@ -240,6 +240,12 @@
          self.build_winusb(CMD_CLEAR_PNG, &[])
      }
@@ -46,7 +46,7 @@ diff -ruN a/crates/lianli-devices/src/crypto.rs b/crates/lianli-devices/src/cryp
      }
 diff -ruN a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/src/winusb/lcd/core.rs
 --- a/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 01:27:48.543902600 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 11:03:18.159451000 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 11:41:17.965979600 -0800
 @@ -70,6 +70,16 @@
      unsafe_cmds
  }
@@ -235,7 +235,7 @@ diff -ruN a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices
                  "frame payload {} exceeds LCD limit {}",
 diff -ruN a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/src/winusb/lcd/mod.rs
 --- a/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 01:27:48.110133700 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 11:03:18.154451000 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 11:41:17.960978100 -0800
 @@ -296,9 +296,9 @@
              DeviceFamily::Vision9p2,
              "Vision 9.2\"",
@@ -250,7 +250,7 @@ diff -ruN a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/
          )),
 diff -ruN a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/src/winusb/lcd/slv3.rs
 --- a/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 01:27:48.761212600 -0800
-+++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 11:03:18.160451000 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 11:41:17.967485400 -0800
 @@ -52,6 +52,16 @@
          self.core.reset_failure_state();
          self.core.stop_playback()?;
@@ -297,7 +297,7 @@ diff -ruN a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices
      fn switch_to_desktop_mode(&mut self) -> Result<()> {
 diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-devices/src/winusb/wired_receiver.rs
 --- a/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 01:27:48.983461500 -0800
-+++ b/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 11:03:18.154451000 -0800
++++ b/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 11:41:17.969013300 -0800
 @@ -35,6 +35,8 @@
  const CMD_GET_VER: u8 = 0x10;
  const CMD_STREAM_RGB: u8 = 0x11;
@@ -307,7 +307,7 @@ diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-d
  const CMD_SET_FANS_PWM: u8 = 0x13;
  const CMD_SET_LIGHT_SYNC_MB: u8 = 0x14;
  const CMD_SAVE_OR_CLEAR: u8 = 0x15;
-@@ -154,6 +156,66 @@
+@@ -154,6 +156,104 @@
          Ok(ctrl)
      }
  
@@ -316,7 +316,7 @@ diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-d
 +    /// of the receiver's own (status bytes 15..19). Without that traffic the
 +    /// Flex LCD stops answering USB a few seconds after the host first talks to
 +    /// it. LIANLI_FLEX_KEEPALIVE=0 turns this off.
-+    fn start_flex_keepalive(ctrl: &Arc<Self>) {
++    fn start_flex_keepalive(ctrl: &Arc<Self>, device: &Device<UsbContext>) {
 +        if !matches!(ctrl.pid, 0x0102 | 0x0104)
 +            || std::env::var("LIANLI_FLEX_KEEPALIVE").is_ok_and(|value| value.trim() == "0")
 +        {
@@ -324,6 +324,9 @@ diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-d
 +        }
 +        let weak = Arc::downgrade(ctrl);
 +        let name = ctrl.params.name;
++        let vid = device.device_descriptor().map(|d| d.vendor_id()).unwrap_or(0x43a8);
++        let bus = device.bus_number();
++        let ports = device.port_numbers().unwrap_or_default();
 +        let spawned = std::thread::Builder::new()
 +            .name("flex-keepalive".into())
 +            .spawn(move || {
@@ -335,7 +338,14 @@ diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-d
 +                    let Some(ctrl) = weak.upgrade() else { break };
 +                    if !ctrl.is_wireless.load(Ordering::Relaxed) {
 +                        if let Err(error) = ctrl.flex_keepalive_tick(tick) {
-+                            debug!("{name}: keepalive failed: {error}");
++                            if is_unplugged(&error) && !ports.is_empty() {
++                                match ctrl.flex_reopen(vid, bus, &ports) {
++                                    Ok(()) => info!("{name}: reopened after the controller reset"),
++                                    Err(error) => debug!("{name}: not back yet: {error}"),
++                                }
++                            } else {
++                                debug!("{name}: keepalive failed: {error}");
++                            }
 +                        }
 +                    }
 +                    drop(ctrl);
@@ -347,6 +357,34 @@ diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-d
 +            Ok(_) => info!("{name}: keepalive started"),
 +            Err(error) => warn!("{name}: cannot start keepalive: {error}"),
 +        }
++    }
++
++    /// Unraid packaging: find the controller again at the same USB port and
++    /// swap in a fresh handle. Lighting and fan writes retry on their own.
++    fn flex_reopen(&self, vid: u16, bus: u8, ports: &[u8]) -> Result<()> {
++        let devices = lianli_transport::usb_context::rescan()
++            .and_then(|context| rusb::UsbContext::devices(&context))
++            .context("rescanning USB")?;
++        for device in devices.iter() {
++            let Ok(desc) = device.device_descriptor() else {
++                continue;
++            };
++            if desc.vendor_id() != vid
++                || desc.product_id() != self.pid
++                || device.bus_number() != bus
++                || device.port_numbers().ok().as_deref() != Some(ports)
++            {
++                continue;
++            }
++            let mut transport =
++                RusbBulk::open_device(device).context("reopening wired receiver")?;
++            transport
++                .detach_and_configure(self.params.name)
++                .context("configuring wired receiver")?;
++            *self.transport.lock() = transport;
++            return Ok(());
++        }
++        anyhow::bail!("controller not on the bus")
 +    }
 +
 +    fn flex_keepalive_tick(&self, tick: u32) -> Result<()> {
@@ -374,17 +412,32 @@ diff -ruN a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-d
      fn total_leds(&self) -> usize {
          *self.fan_count.lock() as usize * self.params.leds_per_fan as usize
      }
-@@ -287,6 +349,7 @@
+@@ -244,6 +344,14 @@
+     }
+ }
+ 
++/// Unraid packaging: the device dropped off USB.
++fn is_unplugged(error: &anyhow::Error) -> bool {
++    matches!(
++        error.downcast_ref::<lianli_transport::TransportError>(),
++        Some(lianli_transport::TransportError::Usb(rusb::Error::NoDevice))
++    )
++}
++
+ fn flex_lcd_count(pid: u16, fan_count: u8, fan_types: &[u8; 4]) -> Option<u8> {
+     let (known, lcd_types) = match pid {
+         0x0102 => (51..=58, [51, 52, 55, 56]),
+@@ -287,6 +395,7 @@
              rusb::Device::clone(&ctx.device),
              ctx.pid,
          )?);
-+        WiredReceiverController::start_flex_keepalive(&ctrl);
++        WiredReceiverController::start_flex_keepalive(&ctrl, &ctx.device);
          let name = ctrl.params().name.to_string();
          let firmware = ctrl.read_firmware().ok();
  
 diff -ruN a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
 --- a/crates/lianli-media/src/common.rs	2026-11-08 01:27:48.327908600 -0800
-+++ b/crates/lianli-media/src/common.rs	2026-11-08 11:03:18.154451000 -0800
++++ b/crates/lianli-media/src/common.rs	2026-11-08 11:41:17.960978100 -0800
 @@ -92,13 +92,24 @@
      let buf = if screen.png {
          encode_png_bytes(&tj_image)?
@@ -419,7 +472,7 @@ diff -ruN a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.r
          return Err(MediaError::PayloadTooLarge { size: buf.len() });
 diff -ruN a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
 --- a/crates/lianli-shared/src/screen.rs	2026-11-08 01:27:47.888486400 -0800
-+++ b/crates/lianli-shared/src/screen.rs	2026-11-08 11:03:18.157452800 -0800
++++ b/crates/lianli-shared/src/screen.rs	2026-11-08 11:41:17.963979300 -0800
 @@ -144,11 +144,32 @@
          DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
          DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
