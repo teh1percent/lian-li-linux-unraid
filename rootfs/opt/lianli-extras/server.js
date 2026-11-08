@@ -224,7 +224,9 @@ function createApp({ daemon, engine, store, options, history, auth }) {
         pixelClean: Object.values(telemetry.pixel_clean_statuses || {}).filter((item) => item.active),
         devices: devices.map((device) => {
           const caps = capabilities.find((item) => item.device_id === device.device_id);
-          const zone = rgbDevices.find((item) => item.device_id === device.device_id)?.zones?.[0];
+          const rgbEntry = rgbDevices.find((item) => item.device_id === device.device_id);
+          // Regional devices (TL Flex) keep their effect in regions, not zones.
+          const zone = rgbEntry?.regions?.[0]?.effect ? { effect: rgbEntry.regions[0].effect } : rgbEntry?.zones?.[0];
           const entry = findEntry(config, device.device_id);
           const rpms = splitRpms(device, telemetry);
           const aio = isAio(device);
