@@ -241,7 +241,8 @@ function createApp({ daemon, engine, store, options, history, auth }) {
             bindStatus: device.wireless_bind_status || null,
             needsRebind: device.needs_rebind === true,
             foreignOnline: device.foreign_master_online === true,
-            firmware: device.firmware_version || null,
+            // Some receivers (TL Flex) answer the version query with binary data.
+            firmware: /^[\x20-\x7e]+$/.test(device.firmware_version || '') ? device.firmware_version : null,
             fanCount: device.fan_count,
             rpms: rpms.fans,
             isAio: aio,
