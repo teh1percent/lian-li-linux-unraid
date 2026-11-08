@@ -40,12 +40,14 @@ RUN apt-get update \
 # Install the upstream Debian 13 release package, verified against SHA256SUMS.
 # Its postinst creates the `lianli` system user and the shared lock files. The
 # package depends on the GUI's libraries, so they stay, but the GUI itself goes.
+# GitHub release downloads sometimes fail for a few minutes, so curl retries.
 RUN set -eux; \
     deb="lian-li-linux_${LIANLI_VERSION}+debian13_amd64.deb"; \
     base="https://github.com/sgtaziz/lian-li-linux/releases/download/v${LIANLI_VERSION}"; \
     cd /tmp; \
-    curl -fsSLo "$deb" "$base/lian-li-linux_${LIANLI_VERSION}%2Bdebian13_amd64.deb"; \
-    curl -fsSLo SHA256SUMS "$base/SHA256SUMS"; \
+    get() { curl -fsSL --retry 10 --retry-all-errors --retry-delay 15 -o "$1" "$2"; }; \
+    get "$deb" "$base/lian-li-linux_${LIANLI_VERSION}%2Bdebian13_amd64.deb"; \
+    get SHA256SUMS "$base/SHA256SUMS"; \
     awk -v f="$deb" '$2 == f || $2 == "./" f' SHA256SUMS | grep . | sha256sum -c -; \
     apt-get update; \
     apt-get install -y --no-install-recommends "./$deb"; \
