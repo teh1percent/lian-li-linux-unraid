@@ -1,6 +1,6 @@
 diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/src/winusb/lcd/core.rs
---- a/crates/lianli-devices/src/winusb/lcd/core.rs
-+++ b/crates/lianli-devices/src/winusb/lcd/core.rs
+--- a/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 01:27:48.543902600 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/core.rs	2026-11-08 01:27:49.117251100 -0800
 @@ -234,8 +234,14 @@
  
      /// Negotiated block size, or the established transfer default before negotiation.
@@ -46,8 +46,8 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/core.rs b/crates/lianli-devices/
          packet[512..total].copy_from_slice(frame);
  
 diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/src/winusb/lcd/mod.rs
---- a/crates/lianli-devices/src/winusb/lcd/mod.rs
-+++ b/crates/lianli-devices/src/winusb/lcd/mod.rs
+--- a/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 01:27:48.110133700 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/mod.rs	2026-11-08 01:27:49.112231400 -0800
 @@ -296,9 +296,9 @@
              DeviceFamily::Vision9p2,
              "Vision 9.2\"",
@@ -61,8 +61,8 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/mod.rs b/crates/lianli-devices/s
              "SL Infinity Flex LCD",
          )),
 diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/src/winusb/lcd/slv3.rs
---- a/crates/lianli-devices/src/winusb/lcd/slv3.rs
-+++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs
+--- a/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 01:27:48.761212600 -0800
++++ b/crates/lianli-devices/src/winusb/lcd/slv3.rs	2026-11-08 01:27:49.117251100 -0800
 @@ -52,6 +52,14 @@
          self.core.reset_failure_state();
          self.core.stop_playback()?;
@@ -103,9 +103,96 @@ diff -ru a/crates/lianli-devices/src/winusb/lcd/slv3.rs b/crates/lianli-devices/
          self.core.set_brightness_val(brightness)
      }
      fn switch_to_desktop_mode(&mut self) -> Result<()> {
+diff -ru a/crates/lianli-devices/src/winusb/wired_receiver.rs b/crates/lianli-devices/src/winusb/wired_receiver.rs
+--- a/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 01:27:48.983461500 -0800
++++ b/crates/lianli-devices/src/winusb/wired_receiver.rs	2026-11-08 01:27:49.118257100 -0800
+@@ -35,6 +35,8 @@
+ const CMD_GET_VER: u8 = 0x10;
+ const CMD_STREAM_RGB: u8 = 0x11;
+ const CMD_GET_INFO: u8 = 0x12;
++/// Unraid packaging: host clock that L-Connect sends a Flex receiver every 3 s.
++const CMD_HOST_CLOCK: u8 = 0x08;
+ const CMD_SET_FANS_PWM: u8 = 0x13;
+ const CMD_SET_LIGHT_SYNC_MB: u8 = 0x14;
+ const CMD_SAVE_OR_CLEAR: u8 = 0x15;
+@@ -154,6 +156,66 @@
+         Ok(ctrl)
+     }
+ 
++    /// Unraid packaging: L-Connect polls a TL Flex receiver with GetInfo once a
++    /// second, and on every third poll sends opcode 0x08 with a clock just ahead
++    /// of the receiver's own (status bytes 15..19). Without that traffic the
++    /// Flex LCD stops answering USB a few seconds after the host first talks to
++    /// it. LIANLI_FLEX_KEEPALIVE=0 turns this off.
++    fn start_flex_keepalive(ctrl: &Arc<Self>) {
++        if !matches!(ctrl.pid, 0x0102 | 0x0104)
++            || std::env::var("LIANLI_FLEX_KEEPALIVE").is_ok_and(|value| value.trim() == "0")
++        {
++            return;
++        }
++        let weak = Arc::downgrade(ctrl);
++        let name = ctrl.params.name;
++        let spawned = std::thread::Builder::new()
++            .name("flex-keepalive".into())
++            .spawn(move || {
++                let mut tick: u32 = 0;
++                loop {
++                    if lianli_transport::usb::shutting_down() {
++                        break;
++                    }
++                    let Some(ctrl) = weak.upgrade() else { break };
++                    if !ctrl.is_wireless.load(Ordering::Relaxed) {
++                        if let Err(error) = ctrl.flex_keepalive_tick(tick) {
++                            debug!("{name}: keepalive failed: {error}");
++                        }
++                    }
++                    drop(ctrl);
++                    tick = tick.wrapping_add(1);
++                    std::thread::sleep(Duration::from_secs(1));
++                }
++            });
++        match spawned {
++            Ok(_) => info!("{name}: keepalive started"),
++            Err(error) => warn!("{name}: cannot start keepalive: {error}"),
++        }
++    }
++
++    fn flex_keepalive_tick(&self, tick: u32) -> Result<()> {
++        let Some(transport) = self.transport.try_lock_for(Duration::from_millis(500)) else {
++            return Ok(());
++        };
++        let mut tx = [0u8; PACKET_SIZE];
++        tx[0] = CMD_GET_INFO;
++        transport.write_full(&tx, LCD_WRITE_TIMEOUT)?;
++        let mut rx = [0u8; PACKET_SIZE];
++        let len = transport.read(&mut rx, LCD_READ_TIMEOUT)?;
++        if tick % 3 != 0 || len < 19 || rx[0] != CMD_GET_INFO {
++            return Ok(());
++        }
++        let clock = u32::from_be_bytes([rx[15], rx[16], rx[17], rx[18]]).wrapping_add(1000);
++        let mut tx = [0u8; PACKET_SIZE];
++        tx[0] = CMD_HOST_CLOCK;
++        tx[1..5].copy_from_slice(&clock.to_be_bytes());
++        transport.write_full(&tx, LCD_WRITE_TIMEOUT)?;
++        let _ = transport.read(&mut rx, LCD_READ_TIMEOUT);
++        debug!("{}: sent host clock {clock:#010x}", self.params.name);
++        Ok(())
++    }
++
+     fn total_leds(&self) -> usize {
+         *self.fan_count.lock() as usize * self.params.leds_per_fan as usize
+     }
+@@ -287,6 +349,7 @@
+             rusb::Device::clone(&ctx.device),
+             ctx.pid,
+         )?);
++        WiredReceiverController::start_flex_keepalive(&ctrl);
+         let name = ctrl.params().name.to_string();
+         let firmware = ctrl.read_firmware().ok();
+ 
 diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
---- a/crates/lianli-media/src/common.rs
-+++ b/crates/lianli-media/src/common.rs
+--- a/crates/lianli-media/src/common.rs	2026-11-08 01:27:48.327908600 -0800
++++ b/crates/lianli-media/src/common.rs	2026-11-08 01:27:49.112231400 -0800
 @@ -92,13 +92,24 @@
      let buf = if screen.png {
          encode_png_bytes(&tj_image)?
@@ -139,8 +226,8 @@ diff -ru a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.rs
      if buf.len() > screen.max_payload {
          return Err(MediaError::PayloadTooLarge { size: buf.len() });
 diff -ru a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
---- a/crates/lianli-shared/src/screen.rs
-+++ b/crates/lianli-shared/src/screen.rs
+--- a/crates/lianli-shared/src/screen.rs	2026-11-08 01:27:47.888486400 -0800
++++ b/crates/lianli-shared/src/screen.rs	2026-11-08 01:27:49.115748500 -0800
 @@ -144,11 +144,33 @@
          DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
          DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
