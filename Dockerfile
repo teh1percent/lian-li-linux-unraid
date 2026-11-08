@@ -3,9 +3,31 @@
 # Runs the hardware daemon in system mode plus a web dashboard. The upstream
 # desktop GUI is not used: the dashboard does its job.
 
+ARG LIANLI_VERSION=1.2.5
+
+# Build the daemon from the same release with the fixes in patches/ applied.
+# The rest of the package (users, udev rules, ffmpeg) comes from the .deb below.
+FROM rust:1-trixie AS daemon
+ARG LIANLI_VERSION
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      clang cmake nasm pkg-config patch \
+      libusb-1.0-0-dev libudev-dev libfontconfig-dev libdrm-dev \
+      libavcodec-dev libavformat-dev libswscale-dev libavutil-dev libavfilter-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY patches/ /patches/
+RUN set -eux; \
+    git clone --depth 1 --branch "v${LIANLI_VERSION}" --recurse-submodules \
+      https://github.com/sgtaziz/lian-li-linux.git .; \
+    for p in /patches/*.patch; do sed -i 's/\r$//' "$p"; patch -p1 --forward < "$p"; done; \
+    cargo build --locked --release -p lianli-daemon; \
+    strip target/release/lianli-daemon
+
 FROM debian:trixie-slim
 
-ARG LIANLI_VERSION=1.2.5
+ARG LIANLI_VERSION
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
@@ -29,6 +51,9 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends "./$deb"; \
     rm -f /usr/bin/lianli-gui; \
     rm -rf /var/lib/apt/lists/* /tmp/*
+
+# Swap in the patched daemon built above.
+COPY --from=daemon /src/target/release/lianli-daemon /usr/bin/lianli-daemon
 
 COPY rootfs/ /
 # Strip CRLF in case the repo was checked out on Windows.
