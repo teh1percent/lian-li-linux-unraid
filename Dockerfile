@@ -5,7 +5,7 @@
 
 FROM debian:trixie-slim
 
-ARG LIANLI_VERSION=1.2.4
+ARG LIANLI_VERSION=1.2.5
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
