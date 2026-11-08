@@ -17,7 +17,7 @@ function syncActive(deviceId) {
 }
 
 function syncNotice() {
-  return data.quickSync?.enabled ? '<div class="card notice">Quick Sync is on. Devices in it follow the Quick Sync effect instead of their own.</div>' : '';
+  return data.devices.some((device) => syncActive(device.id)) ? '<div class="card notice">Quick Sync is on. Devices in it follow the Quick Sync effect instead of their own.</div>' : '';
 }
 
 function motherboardCard(device) {
@@ -163,7 +163,8 @@ function draftFromSaved() {
 }
 
 function quickSyncCard() {
-  if (data.syncDevices.length < 2) return '';
+  // Still shown while it is on, so it can be turned off after devices go away.
+  if (data.syncDevices.length < 2 && !data.quickSync?.enabled) return '';
   const draft = syncDraft || draftFromSaved();
   const candidates = syncCandidates(draft.kind, draft.mode);
   const names = (id) => data.devices.find((device) => device.id === id)?.name || id;
