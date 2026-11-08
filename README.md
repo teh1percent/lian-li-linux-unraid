@@ -107,7 +107,9 @@ The last few are under **Show more settings** in the container's settings.
 
 ## Hardware
 
-Tested in this container with **UNI FAN TL V3 Wireless LCD** fans.
+Tested in this container with **UNI FAN TL V3 Wireless LCD** fans and a wired **TL Flex LCD** screen.
+
+**Wired TL Flex LCD:** TL Flex firmware 2026072401 freezes with the upstream daemon v1.2.5. This image builds the daemon with a fix in `patches/tl-flex.patch`, which opens the screen the same way L-Connect does. If a TL Flex screen is already frozen, turn the PSU off for 30 seconds, then start the server again.
 
 The daemon from [Lian Li Linux](https://github.com/sgtaziz/lian-li-linux) does the hardware work, and supports fans, AIOs, Strimers, LCD screens and wireless dongles. Other devices use the same code but may not have been tried on Unraid yet. Please [open an issue](https://github.com/teh1percent/lian-li-linux-unraid/issues) to say how yours went.
 
@@ -153,6 +155,8 @@ docker exec lian-li-linux sh -c 'grep . /run/lianli-stats/*'
 ```bash
 docker exec -u lianli lian-li-linux lianli-control diagnose-runtime
 ```
+
+**A TL Flex screen froze.** Turn the PSU off for 30 seconds to reset it; restarting the container is not enough. If it keeps freezing, the log line `Flex opening packet` shows whether the opening sequence ran. To turn parts of the fix off for testing, add these variables to the container: `LIANLI_FLEX_OPEN=0` (opening sequence), `LIANLI_FLEX_PNG_LAYER=0` (PNG layer before each frame), `LIANLI_FLEX_KEEPALIVE=0` (receiver keepalive).
 
 **Read the logs:** go to the Docker tab, click the container's icon and choose **Logs**. The **System** page can also download a diagnostics report. Read it before sharing it.
 
