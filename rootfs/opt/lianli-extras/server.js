@@ -6,6 +6,24 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
+
+// Lian Li wireless TX/RX dongles, V1 and V2 (from the upstream device table).
+const WIRELESS_DONGLES = new Set(['0416:8040', '0416:8041', '1a86:e304', '1a86:e305']);
+
+function wirelessDongleConnected(root = '/sys/bus/usb/devices') {
+  try {
+    return fs.readdirSync(root).some((name) => {
+      try {
+        const read = (file) => fs.readFileSync(path.join(root, name, file), 'utf8').trim().toLowerCase();
+        return WIRELESS_DONGLES.has(`${read('idVendor')}:${read('idProduct')}`);
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return true; // Can't tell, so keep showing the daemon's finding.
+  }
+}
 const http = require('http');
 const path = require('path');
 
@@ -15,6 +33,7 @@ const { DaemonClient } = require('./lib/daemon');
 const { Engine, Store, mediaType, findEntry, ALERT_TEMPLATES } = require('./lib/engine');
 const { createFans, MIN_FAN_PERCENT } = require('./lib/fans');
 const { History } = require('./lib/history');
+const { SystemStats } = require('./lib/system');
 const { createLights } = require('./lib/lights');
 const { createMaintenance } = require('./lib/maintenance');
 const { createScreens } = require('./lib/screens');
@@ -46,7 +65,7 @@ const AIO_SENSOR_TYPES = new Set(['hwmon', 'nvidia_gpu', 'amd_gpu_usage', 'wirel
 const HIDDEN_RGB_MODES = new Set(['Direct', 'Render', 'Paint', 'Voice']);
 const DIRECTIONS = new Set(['Clockwise', 'CounterClockwise', 'Up', 'Down', 'Spread', 'Gather']);
 const RESERVED_CURVE = /^(off$|__mb_sync__)/;
-const SCRIPTS = ['app.js', 'fans-more.js', 'lights-more.js', 'screens-more.js', 'designer.js', 'system-more.js', 'boot.js'];
+const SCRIPTS = ['app.js', 'fans-more.js', 'lights-more.js', 'fan-view.js', 'screens-more.js', 'designer.js', 'system-more.js', 'boot.js'];
 const STATIC_FILES = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
@@ -92,7 +111,7 @@ function listMedia(dir) {
   return found.sort();
 }
 
-function createApp({ daemon, engine, store, options, history, auth }) {
+function createApp({ daemon, engine, store, options, history, auth, system }) {
   const publicDir = path.join(__dirname, 'public');
   const alertIds = new Set(Object.values(ALERT_TEMPLATES));
   const selectable = (colors = PRESETS.default, limits = store.data.limits) => (
@@ -185,6 +204,7 @@ function createApp({ daemon, engine, store, options, history, auth }) {
       localTime: engine.now().toLocaleString(),
       timezone: process.env.TZ || 'UTC',
       stats,
+      system: system ? system.values : null,
       settings: {
         schedules: shown.schedules, alerts: shown.alerts, screens: shown.screens, theme: shown.theme,
         customColors: shown.customColors, lcdThemes: shown.lcdThemes, limits: shown.limits, names: shown.names,
@@ -818,7 +838,12 @@ function createApp({ daemon, engine, store, options, history, auth }) {
         return sendJson(res, 200, history ? history.points : []);
       }
       if (req.method === 'GET' && url.pathname === '/api/health') {
-        return sendJson(res, 200, await daemon.request('GetInstallationHealth'));
+        const health = await daemon.request('GetInstallationHealth');
+        // Without a wireless dongle plugged in, a failed wireless start is expected, not an error.
+        if (health && Array.isArray(health.findings) && !wirelessDongleConnected()) {
+          health.findings = health.findings.filter((item) => item.code !== 'device.wireless.initialization');
+        }
+        return sendJson(res, 200, health);
       }
       if (req.method === 'GET' && url.pathname === '/api/export') {
         const backup = { exportedAt: engine.now().toISOString(), daemonConfig: await daemon.request('GetConfig'), dashboard: store.data };
@@ -891,6 +916,9 @@ function main() {
   collect();
   setInterval(collect, STATS_INTERVAL_MS);
 
+  const system = new SystemStats();
+  setInterval(() => system.sample(), STATS_INTERVAL_MS);
+
   const daemon = new DaemonClient(options.socket);
   const engine = new Engine({ daemon, store, statsDir: options.statsDir, getStats: () => stats });
   engine.tick();
@@ -916,6 +944,9 @@ function main() {
       temp: stats.hasTemps ? stats.values.disk_temp_max : null,
       used: stats.available ? stats.values.storage_used_pct : null,
       rpm: rpms.length ? Math.round(rpms.reduce((sum, rpm) => sum + rpm, 0) / rpms.length) : 0,
+      cpu: system.values.cpu,
+      cpuTemp: system.values.cpuTemp,
+      mem: system.values.mem,
     });
     samples += 1;
     if (samples % HISTORY_SAVE_EVERY === 0) {
@@ -927,7 +958,7 @@ function main() {
     }
   }, HISTORY_INTERVAL_MS);
 
-  createApp({ daemon, engine, store, options, history, auth }).listen(options.port, () => {
+  createApp({ daemon, engine, store, options, history, auth, system }).listen(options.port, () => {
     console.log(`lianli-extras: dashboard listening on port ${options.port}`);
   });
 }
