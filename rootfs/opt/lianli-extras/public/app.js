@@ -13,6 +13,8 @@ const ICONS = {
   storage: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   free: '<path d="M12 4v16M4 12h16"/>',
   parity: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 2v4M14 2v4M10 18v4M14 18v4M2 10h4M2 14h4M18 10h4M18 14h4"/>',
+  memory: '<rect x="3" y="7" width="18" height="10" rx="1.5"/><path d="M7 17v3M11 17v3M15 17v3M7 10v4M11 10v4M15 10v4"/>',
 };
 const icon = (name) => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 
@@ -105,8 +107,10 @@ async function actOnAll(items, send) {
   refresh(true);
 }
 
-function tempClass(temp) {
-  const { tempWarn, tempDanger } = data.settings.limits;
+// Drive limits by default; CPU tiles pass their own.
+function tempClass(temp, warn, danger) {
+  const tempWarn = warn ?? data.settings.limits.tempWarn;
+  const tempDanger = danger ?? data.settings.limits.tempDanger;
   if (temp >= tempDanger) return 'bad';
   return temp >= tempWarn ? 'warn' : 'good';
 }
@@ -179,12 +183,43 @@ function renderHistory() {
     historyChart('coolant', 'Coolant', '°C'),
     historyChart('used', 'Storage used', '%'),
     historyChart('rpm', 'Average fan speed', ' RPM'),
+    historyChart('cpuTemp', 'CPU temperature', '°C'),
+    historyChart('mem', 'Memory used', '%'),
   ].join('');
   return `<div class="card"><div class="card-head"><h2>Last 24 hours</h2></div>${charts ? `<div class="charts">${charts}</div>` : '<span class="empty">Collecting data. Charts appear after a couple of minutes.</span>'}</div>`;
 }
 
-function tile(iconName, label, value, tone = '') {
-  return `<div class="tile"><span>${icon(iconName)}${esc(label)}</span><b class="${tone}">${esc(value)}</b></div>`;
+// A small 24-hour trend line for a stat tile, from the Status page history.
+function spark(key) {
+  const values = history.map((point) => point[key]).filter((value) => Number.isFinite(value));
+  if (values.length < 2) return '';
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const range = high - low || 1;
+  const points = values.map((value, index) => `${((index / (values.length - 1)) * 100).toFixed(1)},${(18 - ((value - low) / range) * 16).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true"><polyline points="${points}"/></svg>`;
+}
+
+function tile(iconName, label, value, tone = '', { sub = '', extra = '' } = {}) {
+  return `<div class="tile"><span><i class="tile-icon ${tone}">${icon(iconName)}</i>${esc(label)}</span><b class="${tone}">${esc(value)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}${extra}</div>`;
+}
+
+function meterBar(pct) {
+  const tone = pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : '';
+  return `<div class="meter slim"><i class="${tone}" style="width:${Math.min(100, Math.max(0, pct))}%"></i></div>`;
+}
+
+function systemTiles() {
+  const system = data.system;
+  if (!system) return '';
+  const cpu = system.cpuTemp !== null || system.cpu !== null
+    ? tile('cpu', 'CPU', system.cpuTemp !== null ? `${Math.round(system.cpuTemp)}°C` : `${system.cpu}%`, system.cpuTemp !== null ? tempClass(system.cpuTemp, 70, 85) : '', {
+      sub: system.cpuTemp !== null && system.cpu !== null ? `${system.cpu}% load` : 'Load',
+      extra: spark(system.cpuTemp !== null ? 'cpuTemp' : 'cpu'),
+    })
+    : '';
+  const mem = system.mem !== null ? tile('memory', 'Memory', `${system.mem}%`, '', { sub: 'In use', extra: meterBar(system.mem) }) : '';
+  return cpu + mem;
 }
 
 function storageCard(stats) {
@@ -256,6 +291,7 @@ function fansCard(devices) {
 function renderOverview() {
   const { stats, status, daemon, devices } = data;
   const values = stats.values;
+  const fanParts = fanCards(devices);
   let html = '';
   if (!daemon.connected) html += `<div class="banner">Daemon not reachable. ${esc(daemon.error)}</div>`;
   if (status.alert) {
@@ -266,22 +302,22 @@ function renderOverview() {
   if (status.error) html += `<div class="card notice">Automation problem: ${esc(status.error)}</div>`;
   if (!stats.available) {
     html += `<div class="card notice">Unraid data isn't available. Add the <b>Unraid state</b> path to the container (host <code>/var/local/emhttp</code>).<br><span class="muted">${esc(stats.error)}</span></div>`;
-    html += aioStatusCard() + fansCard(devices);
+    html += fanParts.pictures + aioStatusCard() + fanParts.list;
   } else {
     const storageName = stats.volumes.find((volume) => volume.key === stats.selectedVolume)?.name || 'Storage';
     html += `<div class="tiles">
-      ${tile('temp', 'Hottest drive', stats.hasTemps ? `${values.disk_temp_max}°C` : 'Asleep', stats.hasTemps ? tempClass(values.disk_temp_max) : '')}
-      ${tile('disk', 'Drives awake', `${values.disks_active}/${values.disks_total}`)}
-      ${tile('storage', `${storageName} used`, `${values.storage_used_pct}%`)}
-      ${tile('free', 'TB free', values.storage_free_tb)}
+      ${tile('temp', 'Hottest drive', stats.hasTemps ? `${values.disk_temp_max}°C` : 'Asleep', stats.hasTemps ? tempClass(values.disk_temp_max) : '', { sub: `${values.disks_active} of ${values.disks_total} drives awake`, extra: spark('temp') })}
+      ${systemTiles()}
+      ${tile('storage', `${storageName} used`, `${values.storage_used_pct}%`, '', { sub: `${values.storage_free_tb} TB free`, extra: meterBar(values.storage_used_pct) })}
       ${stats.hasArray ? `${tile('parity', 'Parity errors', values.parity_errors, values.parity_errors ? 'bad' : '')}
       ${tile('parity', 'Parity check', values.sync_pct > 0 ? `${values.sync_pct}%` : 'Idle')}` : ''}
     </div>`;
-    html += renderHistory();
-    html += `<div class="split"><div>${stats.volumes.length ? storageCard(stats) : ''}${aioStatusCard()}${fansCard(devices)}</div><div>${stats.disks.length ? drivesCard(stats) : ''}</div></div>`;
+    html += renderHistory() + fanParts.pictures;
+    html += `<div class="split"><div>${stats.volumes.length ? storageCard(stats) : ''}${aioStatusCard()}${fanParts.list}</div><div>${stats.disks.length ? drivesCard(stats) : ''}</div></div>`;
   }
   html += `<p class="footnote">Server time ${esc(data.localTime)} (${esc(data.timezone)}). Daemon ${esc(daemon.version || 'offline')}.</p>`;
   view.innerHTML = html;
+  fanViewAfterRender();
 }
 
 // Fans --------------------------------------------------------------------
@@ -433,6 +469,46 @@ function effectParams(device, mode) {
   return device.rgbParams.find((item) => item.mode === mode) || null;
 }
 
+// Effects as buttons when there are only a few, else a list.
+const EFFECT_BUTTONS_MAX = 12;
+function effectPicker(modes, current) {
+  if (modes.length > EFFECT_BUTTONS_MAX) {
+    return `<label style="margin-top:0">Effect<select data-rgb-mode>${modes.map((mode) => option(mode, spaced(mode), mode === current)).join('')}</select></label>`;
+  }
+  return `<div class="label-text">Effect</div><input type="hidden" data-rgb-mode value="${esc(current)}">
+    <div class="chips" role="group" aria-label="Effect">${modes.map((mode) => `<button type="button" class="chip" data-rgb-pick="${esc(mode)}" aria-pressed="${mode === current}">${esc(spaced(mode))}</button>`).join('')}</div>`;
+}
+
+// A five-step slider (0 to 4) that names its level, for brightness and speed.
+function levelSlider(title, attr, names, level) {
+  return `<label><span class="slider-label"><span>${esc(title)}</span><span data-out>${esc(names[level] ?? '')}</span></span><input type="range" min="0" max="4" step="1" value="${level}" ${attr} data-names="${esc(names.join('|'))}"></label>`;
+}
+
+// Colours picked recently on this browser, to reuse with one click.
+const RECENT_KEY = 'lianli.recentColors';
+function loadRecent() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+    return Array.isArray(saved) ? saved.filter((value) => /^#[0-9a-f]{6}$/i.test(value)).slice(0, 8) : [];
+  } catch {
+    return [];
+  }
+}
+function rememberColor(value) {
+  const list = [value.toLowerCase(), ...loadRecent().filter((item) => item !== value.toLowerCase())].slice(0, 8);
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch {
+    // Private windows can block storage; recent colours just won't show.
+  }
+}
+function recentColors() {
+  const list = loadRecent();
+  if (!list.length) return '';
+  return `<div class="recent"><span class="muted">Recent</span>${list.map((value) => `<button type="button" class="recent-dot" data-recent="${value}" style="background:${value}" aria-label="Use ${value}" title="Use ${value}"></button>`).join('')}</div>`;
+}
+let lastColorInput = null;
+
 function renderLights() {
   const lights = data.devices.filter((device) => device.hasRgb && !device.unbound);
   let html = syncNotice();
@@ -449,11 +525,11 @@ function renderLights() {
     if (device.lighting?.motherboard) return motherboardCard(device);
     return `<div class="card" data-device="${esc(device.id)}">
       <div class="card-head"><h2>${esc(device.name)}</h2>${colors.length ? `<span class="dots" aria-hidden="true">${colors.map((color) => `<i style="background:${hex(color)}"></i>`).join('')}</span>` : ''}</div>
-      <label style="margin-top:0">Effect<select data-rgb-mode>${modes.map((mode) => option(mode, spaced(mode), mode === effect.mode)).join('')}</select></label>
-      ${colors.length ? `<div class="colors">${colors.map((color, index) => `<label>${colors.length > 1 ? `Colour ${index + 1}` : 'Colour'}<input type="color" data-rgb-color value="${hex(color)}"></label>`).join('')}</div>` : ''}
+      ${effectPicker(modes, effect.mode)}
+      ${colors.length ? `<div class="colors">${colors.map((color, index) => `<label>${colors.length > 1 ? `Colour ${index + 1}` : 'Colour'}<input type="color" data-rgb-color value="${hex(color)}"></label>`).join('')}</div>${recentColors()}` : ''}
       <div class="two">
-        <label>Brightness<select data-rgb-brightness>${[0, 1, 2, 3, 4].map((level) => option(level, `${(level + 1) * 20}%`, level === (effect.brightness ?? 4))).join('')}</select></label>
-        ${canSpeed ? `<label>Speed<select data-rgb-speed>${['Slowest', 'Slow', 'Medium', 'Fast', 'Fastest'].map((name, level) => option(level, name, level === (effect.speed ?? 2))).join('')}</select></label>` : ''}
+        ${levelSlider('Brightness', 'data-rgb-brightness', ['20%', '40%', '60%', '80%', '100%'], effect.brightness ?? 4)}
+        ${canSpeed ? levelSlider('Speed', 'data-rgb-speed', ['Slowest', 'Slow', 'Medium', 'Fast', 'Fastest'], effect.speed ?? 2) : ''}
       </div>
       ${directions.length > 1 ? `<label>Direction<select data-rgb-direction>${directions.map((item) => option(item, spaced(item), item === effect.direction)).join('')}</select></label>` : ''}
       <div class="actions"><button class="btn" data-rgb-all>Use on all fans</button></div>
@@ -867,6 +943,8 @@ view.addEventListener('input', (event) => {
     document.getElementById('curvePreview').innerHTML = curveChart(curveDraft.points);
   }
   if (target.dataset.show !== undefined) target.closest('label').querySelector('[data-out]').textContent = `${target.value}${target.dataset.show}`;
+  if (target.dataset.names) target.closest('label').querySelector('[data-out]').textContent = target.dataset.names.split('|')[Number(target.value)] || '';
+  if (target.matches('[data-rgb-color]')) lastColorInput = target;
   if (target.dataset.limit) themeDraft.limits[target.dataset.limit] = Number(target.value);
   if (target.dataset.themeColor) themeDraft.customColors[target.dataset.themeColor] = rgbOf(target.value);
 });
@@ -885,6 +963,7 @@ view.addEventListener('change', (event) => {
     target.blur();
     act('/api/fan', { device_id: deviceOf(target), mode: 'constant', percent: Number(target.value) });
   } else if (target.matches('[data-rgb-mode], [data-rgb-color], [data-rgb-brightness], [data-rgb-speed], [data-rgb-direction]')) {
+    if (target.matches('[data-rgb-color]')) rememberColor(target.value);
     target.blur();
     act('/api/rgb', rgbBody(target.closest('[data-device]')));
   } else if (target.dataset.aioMode) {
@@ -963,6 +1042,17 @@ view.addEventListener('click', async (event) => {
   const target = event.target.closest('button');
   if (!target) return;
   const set = target.dataset;
+  if (set.rgbPick !== undefined || set.recent !== undefined) {
+    const card = target.closest('[data-device]');
+    const input = set.recent !== undefined
+      ? (lastColorInput && card.contains(lastColorInput) ? lastColorInput : card.querySelector('[data-rgb-color]'))
+      : card.querySelector('[data-rgb-mode]');
+    if (!input) return;
+    input.value = set.recent ?? set.rgbPick;
+    if (set.rgbPick !== undefined) card.querySelectorAll('[data-rgb-pick]').forEach((chip) => chip.setAttribute('aria-pressed', String(chip === target)));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
   if (set.mute !== undefined) {
     act('/api/alerts/mute', { hours: Number(set.mute) });
   } else if (target.matches('[data-fan-all]')) {

@@ -149,7 +149,9 @@ function fixSyncMode(draft) {
 function draftFromSaved() {
   const saved = data.quickSync;
   const disabled = new Set(saved?.disabled_devices || []);
-  const ids = (saved?.device_order || data.syncDevices.filter((device) => device.continuous).map((device) => device.id)).filter((id) => !disabled.has(id));
+  // Devices that have since been unplugged or moved to another port would make the save fail.
+  const present = new Set(data.syncDevices.map((device) => device.id));
+  const ids = (saved?.device_order || data.syncDevices.filter((device) => device.continuous).map((device) => device.id)).filter((id) => !disabled.has(id) && present.has(id));
   return fixSyncMode({
     enabled: saved?.enabled === true,
     kind: saved?.kind || 'Continuous',
