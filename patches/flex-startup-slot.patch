@@ -1,0 +1,31 @@
+diff --git a/crates/lianli-devices/src/winusb/wired_receiver/control.rs b/crates/lianli-devices/src/winusb/wired_receiver/control.rs
+index 9ad9c54..c48befd 100644
+--- a/crates/lianli-devices/src/winusb/wired_receiver/control.rs
++++ b/crates/lianli-devices/src/winusb/wired_receiver/control.rs
+@@ -302,6 +302,10 @@ fn startup_theme_mask(status: &[u8], slot: u8, enabled: bool) -> Result<u8> {
+     } else {
+         status[20]
+     };
++    // Unraid packaging: a TL Flex receiver with one fan keeps its screen on
++    // internal hub port 3 (the controller is port 4), so the port-based slot
++    // comes out as 2. A single-fan receiver only has slot 0.
++    let slot = if count == 1 { 0 } else { slot };
+     anyhow::ensure!(
+         (1..=4).contains(&count) && slot < count,
+         "Flex LCD physical slot is out of range"
+@@ -412,6 +416,15 @@ mod tests {
+         assert!(startup_theme_mask(&status, 0, false).is_err());
+     }
+ 
++    #[test]
++    fn a_single_fan_receiver_uses_slot_zero_whatever_port_its_screen_is_on() {
++        let mut status = [0; 42];
++        status[0] = CMD_GET_INFO;
++        status[20] = 1;
++        assert_eq!(startup_theme_mask(&status, 2, true).unwrap(), 0b0001);
++        assert_eq!(startup_theme_mask(&status, 0, true).unwrap(), 0b0001);
++    }
++
+     #[test]
+     fn pwm_ack_requires_opcode_and_success_status() {
+         for response in [&[][..], &[0x13], &[0x12, 0], &[0x13, 1]] {
