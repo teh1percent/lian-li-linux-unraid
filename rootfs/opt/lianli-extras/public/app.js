@@ -758,11 +758,13 @@ function renderAuto() {
 
 // System ------------------------------------------------------------------
 
-function deviceCard(device) {
+function deviceCard(device, screen) {
   const wireless = device.id.startsWith('wireless:');
   const parts = [device.model];
   if (device.serial) parts.push(device.serial);
   if (device.firmware) parts.push(`firmware ${device.firmware}`);
+  // A fan's own screen shares its card and takes its name.
+  if (screen) parts.push(`screen: ${[screen.model, screen.serial].filter(Boolean).join(', ')}`);
   const takeover = device.bindStatus === 'bind_other';
   const pairing = !wireless && !device.unbound ? ''
     : device.unbound || takeover
@@ -788,12 +790,31 @@ function healthCard() {
     <div class="actions"><button class="btn" id="healthRefresh">Check again</button></div></div>`;
 }
 
+// Fans first, in the order set on the Status page, each with its own screen
+// folded in; then everything else.
+function systemDeviceCards() {
+  const shown = data.devices.filter((device) => !device.hidden);
+  const fans = shown.filter((device) => device.hasFan);
+  const screens = typeof fanScreens === 'function' ? fanScreens(fans) : new Map();
+  const paired = new Set([...screens.values()].filter(Boolean).map((screen) => screen.id));
+  const order = (typeof fanLayout === 'function' && fanLayout().order) || [];
+  const rank = (device) => {
+    const at = order.indexOf(device.id);
+    return device.hasFan ? (at < 0 ? order.length : at) : order.length + 1;
+  };
+  return shown.filter((device) => !paired.has(device.id))
+    .map((device, index) => ({ device, index }))
+    .sort((a, b) => rank(a.device) - rank(b.device) || a.index - b.index)
+    .map(({ device }) => deviceCard(device, screens.get(device.id)))
+    .join('');
+}
+
 function renderSystem() {
   const settings = data.daemonSettings;
   const unbound = data.devices.filter((device) => device.unbound && !device.foreignOnline);
   let html = '<div class="page-title"><h2>Devices</h2></div>';
   if (unbound.length > 1) html += '<div class="toolbar"><button class="btn" id="pairAll">Pair all unpaired fans</button></div>';
-  html += data.devices.length ? `<div class="cards">${data.devices.filter((device) => !device.hidden).map(deviceCard).join('')}</div>` : '<div class="card empty">No devices found.</div>';
+  html += data.devices.length ? `<div class="cards">${systemDeviceCards()}</div>` : '<div class="card empty">No devices found.</div>';
   html += '<div class="split"><div>';
   if (settings) {
     html += `<div class="card"><div class="card-head"><h2>Settings</h2></div>

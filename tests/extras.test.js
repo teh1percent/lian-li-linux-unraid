@@ -1183,3 +1183,23 @@ test('the fan order and fans per row are saved and checked', async () => {
   assert.deepStrictEqual(after.settings.fanLayout, { order: ['b', 'a'], perRow: 3 });
   await call('/api/fan-layout', { order: [], perRow: 0 });
 });
+
+test('an unnamed TL Flex screen takes the name of the fan on its receiver', async () => {
+  const receiver = { device_id: 'hid:43a8:0102:1-14.2.4', family: 'WiredReceiver', name: 'TL Flex LCD Controller', serial: null, has_fan: true, has_rgb: true, has_lcd: false, fan_count: 1 };
+  const screen = { device_id: 'hid:1cbe:a018:1-14.2.3', family: 'TlFlexLcd', name: 'TL Flex LCD', serial: 'abc', has_fan: false, has_rgb: false, has_lcd: true };
+  const other = { ...screen, device_id: 'hid:1cbe:a018:1-14.4.3', serial: 'def' };
+  mock.state.extra.push(receiver, screen, other);
+  try {
+    assert.strictEqual((await call('/api/device', { device_id: receiver.device_id, action: 'rename', name: 'Left' })).status, 200);
+    let state = await (await call('/api/state')).json();
+    const named = (id) => state.devices.find((item) => item.id === id).name;
+    assert.strictEqual(named(screen.device_id), 'Left screen');
+    assert.strictEqual(named(other.device_id), 'TL Flex LCD');
+    await call('/api/device', { device_id: screen.device_id, action: 'rename', name: 'Front' });
+    state = await (await call('/api/state')).json();
+    assert.strictEqual(named(screen.device_id), 'Front');
+  } finally {
+    for (const id of [receiver.device_id, screen.device_id]) await call('/api/device', { device_id: id, action: 'rename', name: '' });
+    mock.state.extra.splice(mock.state.extra.length - 3, 3);
+  }
+});

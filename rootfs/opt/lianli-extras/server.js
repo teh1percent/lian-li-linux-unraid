@@ -80,6 +80,20 @@ const PUBLIC_FILES = {
 const SESSION_COOKIE = 'lianli_session';
 const COOKIE_FLAGS = 'HttpOnly; SameSite=Lax; Path=/';
 
+// The USB hub a device sits behind, such as "1-14.2" for "hid:1cbe:a018:1-14.2.3".
+function usbParent(id) {
+  const match = /:(\d+-[\d.]+)$/.exec(id || '');
+  return match && match[1].includes('.') ? match[1].replace(/\.\d+$/, '') : null;
+}
+
+// A TL Flex screen sits behind the same receiver hub as its fan's controller,
+// so an unnamed screen takes that fan's name: "Left screen".
+function screenOwnerName(device, devices, names) {
+  const parent = device.has_lcd && !device.has_fan && usbParent(device.device_id);
+  const fan = parent && devices.find((other) => other.has_fan && names[other.device_id] && usbParent(other.device_id) === parent);
+  return fan ? `${names[fan.device_id]} screen` : null;
+}
+
 function isAio(device) {
   return AIO_FAMILIES.has(device.family) || device.has_pump === true || device.has_pump_control === true;
 }
@@ -254,7 +268,7 @@ function createApp({ daemon, engine, store, options, history, auth, system }) {
           return {
             ...Object.assign({}, ...features.map((feature) => feature.device?.(device, context))),
             id: device.device_id,
-            name: store.data.names[device.device_id] || device.name,
+            name: store.data.names[device.device_id] || screenOwnerName(device, devices, store.data.names) || device.name,
             model: device.name,
             serial: device.serial,
             hasFan: device.has_fan,
