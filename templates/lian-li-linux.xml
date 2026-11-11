@@ -33,7 +33,7 @@ Not affiliated with Lian Li Industrial Co., Ltd.</Overview>
   <DonateLink/>
   <Requires>Lian Li USB devices (controller, AIO, LCD, or TX/RX dongles) connected to the Unraid server. amd64 only.</Requires>
   <Date>2026-11-04</Date>
-  <Changes>Initial Community Applications release, based on Lian Li Linux 1.2.6.</Changes>
+  <Changes>Initial Community Applications release, based on Lian Li Linux 1.2.5.</Changes>
   <License>MIT</License>
   <Config Name="Dashboard port" Target="6090" Default="6090" Mode="tcp" Description="Phone-friendly web dashboard: status, fans, lighting, LCD screens, schedules, alerts and settings." Type="Port" Display="always" Required="true" Mask="false">6090</Config>
   <Config Name="Unraid state" Target="/host/emhttp" Default="/var/local/emhttp" Mode="ro" Description="Unraid's array status files, used for drive temperatures, array usage and parity state. Read without waking sleeping drives." Type="Path" Display="always" Required="true" Mask="false">/var/local/emhttp</Config>
