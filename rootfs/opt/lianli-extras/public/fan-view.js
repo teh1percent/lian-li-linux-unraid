@@ -4,8 +4,11 @@
 // light bar or the screen opens a small editor for that part.
 
 let fanEdit = null; // { device, lcd, part: 'Top' | 'Bottom' | 'screen', draft }
+let fanArrange = false; // true while the fans are being put in order
+let fanDragId = null;
 
 holds.push(() => tab === 'overview' && fanEdit !== null);
+holds.push(() => tab === 'overview' && fanDragId !== null);
 
 // LED positions of one TL fan (13 top, 13 bottom), from the daemon's TL renderer.
 const TL_TOP = [[0, 63], [13, 46], [27, 29], [44, 17], [61, 7], [77, 0], [94, 0], [111, 0], [127, 7], [144, 17], [161, 29], [173, 46], [187, 63]];
@@ -112,12 +115,16 @@ function lightsLabel(device) {
   return top === bottom ? top : `${top} / ${bottom}`;
 }
 
-function fanPicture(device, lcd, index) {
+function fanPicture(device, lcd, index, last) {
   const key = `${index}`;
   const blades = Array.from({ length: 9 }, (_, blade) => `<path class="fan-blade" d="M60 60 Q ${60 + 30 * Math.cos((blade * 40 + 20) * Math.PI / 180)} ${60 + 30 * Math.sin((blade * 40 + 20) * Math.PI / 180)} ${60 + 44 * Math.cos(blade * 40 * Math.PI / 180)} ${60 + 44 * Math.sin(blade * 40 * Math.PI / 180)}" />`).join('');
   const rpm = (device.rpms || []).filter((value) => value > 0);
   const selected = fanEdit?.device === device.id ? fanEdit.part : null;
-  return `<figure class="fan-figure${selected ? ' editing' : ''}">
+  const moves = fanArrange ? `<div class="fan-move">
+      <button class="btn icon" data-fan-move="-1" data-fan-id="${esc(device.id)}" aria-label="Move ${esc(device.name)} earlier" ${index === 0 ? 'disabled' : ''}>&#8592;</button>
+      <button class="btn icon" data-fan-move="1" data-fan-id="${esc(device.id)}" aria-label="Move ${esc(device.name)} later" ${last ? 'disabled' : ''}>&#8594;</button>
+    </div>` : '';
+  return `<figure class="fan-figure${selected ? ' editing' : ''}${fanArrange ? ' arranging' : ''}" data-fan-card="${esc(device.id)}"${fanArrange ? ' draggable="true"' : ''}>
     <svg viewBox="0 0 120 120" class="fan-svg" role="group" aria-label="${esc(device.name)}">
       <rect x="2" y="2" width="116" height="116" rx="14" class="fan-frame"/>
       <circle cx="60" cy="60" r="48" class="fan-ring"/>
@@ -131,6 +138,7 @@ function fanPicture(device, lcd, index) {
       <span class="muted">${esc(lightsLabel(device))}</span>
       <span class="muted">${esc(lcd ? screenLabel(lcd) : 'No screen')}</span>
       <span class="pill ${rpm.length ? 'live' : ''}">${rpm.length ? `${rpm.join(' / ')} RPM` : '0 RPM'}</span>
+      ${moves}
     </figcaption>
   </figure>`;
 }
@@ -177,14 +185,60 @@ function fanEditor() {
   </div>`;
 }
 
+function fanLayout() {
+  return data.settings.fanLayout || { order: [], perRow: 0 };
+}
+
+// Fans in the saved order. Fans that aren't in it yet go at the end.
+function orderedFans(devices) {
+  const order = fanLayout().order;
+  const rank = (device) => {
+    const at = order.indexOf(device.id);
+    return at < 0 ? order.length : at;
+  };
+  return devices.filter(regionalFan).map((device, index) => ({ device, index }))
+    .sort((a, b) => rank(a.device) - rank(b.device) || a.index - b.index)
+    .map((item) => item.device);
+}
+
 function fanViewCard(devices) {
-  const fans = devices.filter(regionalFan);
+  const fans = orderedFans(devices);
   if (!fans.length) return '';
   const screens = fanScreens(fans);
-  return `<div class="card" id="fanView"><div class="card-head"><h2>Your fans</h2></div>
-    <div class="fan-row">${fans.map((device, index) => fanPicture(device, screens.get(device.id), index)).join('')}</div>
-    ${fanEditor() || '<p class="muted" style="margin-bottom:0">Click a light bar or a screen to change it.</p>'}
+  const perRow = fanLayout().perRow;
+  const grid = perRow ? ` fixed${perRow >= 4 ? ' compact' : ''}" style="--per-row:${perRow}` : '';
+  const button = fans.length > 1 || fanArrange
+    ? `<button class="btn${fanArrange ? ' primary' : ''}" data-fan-arrange>${fanArrange ? 'Done' : 'Arrange'}</button>` : '';
+  const footer = fanArrange
+    ? `<div class="fan-arrange-bar"><label>Fans per row<select data-fan-per-row>${[0, 1, 2, 3, 4, 5, 6].map((count) => option(count, count || 'Fit to width', count === perRow)).join('')}</select></label>
+      <p class="muted">Drag the fans, or use the arrows, to match the order in your case.</p></div>`
+    : fanEditor() || '<p class="muted" style="margin-bottom:0">Click a light bar or a screen to change it.</p>';
+  return `<div class="card" id="fanView"><div class="card-head"><h2>Your fans</h2>${button}</div>
+    <div class="fan-row${grid}">${fans.map((device, index) => fanPicture(device, screens.get(device.id), index, index === fans.length - 1)).join('')}</div>
+    ${footer}
   </div>`;
+}
+
+async function saveFanLayout(change) {
+  const before = fanLayout();
+  data.settings.fanLayout = { ...before, ...change };
+  renderOverview();
+  try {
+    await post('/api/fan-layout', change);
+  } catch (error) {
+    data.settings.fanLayout = before;
+    renderOverview();
+    toast(error.message, true);
+  }
+}
+
+// Move one fan to a new place in the order and save it.
+function moveFan(id, to) {
+  const ids = orderedFans(data.devices).map((device) => device.id);
+  const from = ids.indexOf(id);
+  if (from < 0 || to < 0 || to >= ids.length || to === from) return;
+  ids.splice(to, 0, ...ids.splice(from, 1));
+  saveFanLayout({ order: ids });
 }
 
 // Called after the Status page is drawn: show the screen's current choice in the editor.
@@ -251,7 +305,22 @@ async function saveFanPart() {
 
 view.addEventListener('click', (event) => {
   if (tab !== 'overview') return;
-  const part = event.target.closest('[data-fan-part], [data-fan-screen]');
+  if (event.target.closest('[data-fan-arrange]')) {
+    fanArrange = !fanArrange;
+    fanEdit = null;
+    renderOverview();
+    return;
+  }
+  const move = event.target.closest('[data-fan-move]');
+  if (move) {
+    const { fanId, fanMove } = move.dataset;
+    const ids = orderedFans(data.devices).map((device) => device.id);
+    moveFan(fanId, ids.indexOf(fanId) + Number(fanMove));
+    // Keep keyboard focus on the fan that moved.
+    view.querySelector(`[data-fan-move="${fanMove}"][data-fan-id="${CSS.escape(fanId)}"]:not([disabled])`)?.focus();
+    return;
+  }
+  const part = !fanArrange && event.target.closest('[data-fan-part], [data-fan-screen]');
   if (part) {
     if (part.dataset.fanPart) openFanPart(part.dataset.fanDevice, part.dataset.fanPart);
     else {
@@ -275,13 +344,17 @@ view.addEventListener('click', (event) => {
 });
 
 view.addEventListener('keydown', (event) => {
-  if (tab !== 'overview' || (event.key !== 'Enter' && event.key !== ' ')) return;
+  if (tab !== 'overview' || fanArrange || (event.key !== 'Enter' && event.key !== ' ')) return;
   if (!event.target.closest('[data-fan-part], [data-fan-screen]')) return;
   event.preventDefault();
   event.target.closest('[data-fan-part], [data-fan-screen]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
 });
 
 view.addEventListener('change', (event) => {
+  if (tab === 'overview' && event.target.matches('[data-fan-per-row]')) {
+    saveFanLayout({ perRow: Number(event.target.value) });
+    return;
+  }
   if (tab !== 'overview' || !fanEdit?.draft) return;
   const { target } = event;
   if (target.dataset.fanE) {
@@ -292,4 +365,36 @@ view.addEventListener('change', (event) => {
   } else if (target.matches('[data-fan-both]')) {
     fanEdit.draft.both = target.checked;
   }
+});
+
+// Drag a fan card onto another to put it in that place.
+view.addEventListener('dragstart', (event) => {
+  const card = fanArrange && event.target.closest?.('[data-fan-card]');
+  if (!card) return;
+  fanDragId = card.dataset.fanCard;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', fanDragId);
+  card.classList.add('dragging');
+});
+
+view.addEventListener('dragover', (event) => {
+  const card = fanDragId && event.target.closest('[data-fan-card]');
+  if (!card) return;
+  event.preventDefault();
+  view.querySelectorAll('.drop-target').forEach((item) => item !== card && item.classList.remove('drop-target'));
+  if (card.dataset.fanCard !== fanDragId) card.classList.add('drop-target');
+});
+
+view.addEventListener('drop', (event) => {
+  const card = fanDragId && event.target.closest('[data-fan-card]');
+  if (!card) return;
+  event.preventDefault();
+  const id = fanDragId;
+  fanDragId = null;
+  moveFan(id, orderedFans(data.devices).map((device) => device.id).indexOf(card.dataset.fanCard));
+});
+
+view.addEventListener('dragend', () => {
+  fanDragId = null;
+  view.querySelectorAll('.dragging, .drop-target').forEach((item) => item.classList.remove('dragging', 'drop-target'));
 });

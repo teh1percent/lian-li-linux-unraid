@@ -208,6 +208,7 @@ function createApp({ daemon, engine, store, options, history, auth, system }) {
       settings: {
         schedules: shown.schedules, alerts: shown.alerts, screens: shown.screens, theme: shown.theme,
         customColors: shown.customColors, lcdThemes: shown.lcdThemes, limits: shown.limits, names: shown.names,
+        fanLayout: shown.fanLayout,
       },
       status: engine.status(),
       media: allMedia(),
@@ -585,6 +586,16 @@ function createApp({ daemon, engine, store, options, history, auth, system }) {
     store.save();
   }
 
+  // The order and grid of the fan pictures on the Status page, to match the case.
+  async function setFanLayout(body) {
+    const order = body.order ?? store.data.fanLayout.order;
+    const perRow = body.perRow ?? store.data.fanLayout.perRow;
+    check(Array.isArray(order) && order.length <= 64 && order.every((id) => typeof id === 'string' && id.length <= 200), 'Fan order must be a list of device ids');
+    check(Number.isInteger(perRow) && perRow >= 0 && perRow <= 6, 'Fans per row must be 0 to 6');
+    store.data.fanLayout = { order: [...new Set(order)], perRow };
+    store.save();
+  }
+
   async function setSchedules(body) {
     check(Array.isArray(body.schedules) && body.schedules.length <= 16, 'Too many schedules');
     const clean = [];
@@ -709,6 +720,7 @@ function createApp({ daemon, engine, store, options, history, auth, system }) {
     '/api/theme': setTheme,
     '/api/pixel': setPixel,
     '/api/storage': setStorage,
+    '/api/fan-layout': setFanLayout,
     '/api/schedules': setSchedules,
     '/api/alerts': setAlerts,
     '/api/alerts/mute': muteAlerts,

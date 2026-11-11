@@ -1167,3 +1167,19 @@ test('the system page script carries the version and credits', async () => {
   assert.ok(script.includes('data.daemon?.version'));
   assert.strictEqual((await stateOf()).daemon.version, '1.2.3');
 });
+
+test('the fan order and fans per row are saved and checked', async () => {
+  const before = await (await call('/api/state')).json();
+  assert.deepStrictEqual(before.settings.fanLayout, { order: [], perRow: 0 });
+
+  assert.strictEqual((await call('/api/fan-layout', { order: ['b', 'a', 'b'] })).status, 200);
+  assert.strictEqual((await call('/api/fan-layout', { perRow: 3 })).status, 200);
+  assert.deepStrictEqual(new Store(store.file).data.fanLayout, { order: ['b', 'a'], perRow: 3 });
+
+  assert.strictEqual((await call('/api/fan-layout', { perRow: 9 })).status, 400);
+  assert.strictEqual((await call('/api/fan-layout', { order: 'a' })).status, 400);
+  assert.strictEqual((await call('/api/fan-layout', { order: [1] })).status, 400);
+  const after = await (await call('/api/state')).json();
+  assert.deepStrictEqual(after.settings.fanLayout, { order: ['b', 'a'], perRow: 3 });
+  await call('/api/fan-layout', { order: [], perRow: 0 });
+});
