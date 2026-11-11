@@ -473,7 +473,7 @@ diff -ruN a/crates/lianli-media/src/common.rs b/crates/lianli-media/src/common.r
 diff -ruN a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen.rs
 --- a/crates/lianli-shared/src/screen.rs	2026-11-08 01:27:47.888486400 -0800
 +++ b/crates/lianli-shared/src/screen.rs	2026-11-08 11:41:17.963979300 -0800
-@@ -144,11 +144,32 @@
+@@ -144,11 +144,36 @@
          DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
          DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
          DeviceFamily::Vision9p2 => Some(ScreenInfo::VISION_9P2),
@@ -500,6 +500,10 @@ diff -ruN a/crates/lianli-shared/src/screen.rs b/crates/lianli-shared/src/screen
 +            .map_or(102_400 - 512, |size| size.clamp(16_384, 512_000));
 +        // L-Connect never lets the panel go quiet, so re-send unchanged frames.
 +        screen.needs_keepalive = true;
++        // L-Connect only ever sends a Flex panel still frames (PushPng and
++        // PushJpg). Switching it out of H.264 play mode to show new media
++        // locks it up, so use still frames too. LIANLI_FLEX_H264=1 undoes this.
++        screen.h264 = std::env::var("LIANLI_FLEX_H264").is_ok_and(|value| value.trim() == "1");
 +        screen
 +    }
 +}
