@@ -1,8 +1,8 @@
 diff --git a/crates/lianli-daemon/src/service/init.rs b/crates/lianli-daemon/src/service/init.rs
-index 6380ed1..02ddb17 100644
+index eb299ec..ff01ad7 100644
 --- a/crates/lianli-daemon/src/service/init.rs
 +++ b/crates/lianli-daemon/src/service/init.rs
-@@ -468,6 +468,14 @@ impl ServiceManager {
+@@ -465,6 +465,14 @@ impl ServiceManager {
              let pid = det.pid;
              let topology_key = det.topology_key();
  

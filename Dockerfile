@@ -3,7 +3,7 @@
 # Runs the hardware daemon in system mode plus a web dashboard. The upstream
 # desktop GUI is not used: the dashboard does its job.
 
-ARG LIANLI_VERSION=1.2.5
+ARG LIANLI_VERSION=1.2.6
 
 # Build the daemon from the same release with the fixes in patches/ applied.
 # The rest of the package (users, udev rules, ffmpeg) comes from the .deb below.
