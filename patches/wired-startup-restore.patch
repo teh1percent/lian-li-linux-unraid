@@ -1,0 +1,56 @@
+--- a/crates/lianli-devices/src/winusb/wired_receiver.rs
++++ b/crates/lianli-devices/src/winusb/wired_receiver.rs
+@@ -150,12 +150,53 @@
+             );
+         }
+ 
++        if matches!(pid, 0x0102 | 0x0104) {
++            ctrl.flex_startup_selection_check();
++        }
++
+         let total = ctrl.total_leds();
+         *ctrl.led_buffer.lock() = vec![[0, 0, 0]; total];
+ 
+         Ok(ctrl)
+     }
+ 
++    /// Unraid packaging: logs each Flex receiver's startup selection (GetInfo
++    /// byte 31, high nibble, one bit per fan slot: set means the receiver's
++    /// built-in startup screen). Uploading a startup image clears the bit, and a
++    /// single-fan TL Flex screen was then left unable to start. With
++    /// LIANLI_FLEX_RESTORE_STARTUP=1, a receiver whose slot 0 bit is clear has it
++    /// set again and saved, and its LCD is rebooted.
++    fn flex_startup_selection_check(&self) {
++        let mut tx = [0u8; PACKET_SIZE];
++        tx[0] = CMD_GET_INFO;
++        let status = match self.send_and_read(&tx) {
++            Ok(status) if status.len() >= 42 && status[0] == CMD_GET_INFO => status,
++            _ => return,
++        };
++        let mask = status[31] >> 4;
++        info!(
++            "{}: startup selection {mask:#06b}, fan count byte {}",
++            self.params.name, status[20]
++        );
++        if mask & 1 != 0
++            || !std::env::var("LIANLI_FLEX_RESTORE_STARTUP").is_ok_and(|value| value.trim() == "1")
++        {
++            return;
++        }
++        warn!("{}: restoring the built-in startup screen for slot 0", self.params.name);
++        let result = (|| -> Result<()> {
++            self.update_wireless_theme_switch(mask | 1)?;
++            std::thread::sleep(Duration::from_millis(200));
++            self.save_or_clear_config(true)?;
++            std::thread::sleep(Duration::from_millis(200));
++            self.reboot_lcd(&AtomicBool::new(false))
++        })();
++        match result {
++            Ok(()) => info!("{}: built-in startup screen restored; LCD rebooted", self.params.name),
++            Err(error) => warn!("{}: restoring the startup screen failed: {error:#}", self.params.name),
++        }
++    }
++
+     /// Unraid packaging: L-Connect polls a TL Flex receiver with GetInfo once a
+     /// second, and on every third poll sends opcode 0x08 with a clock just ahead
+     /// of the receiver's own (status bytes 15..19). Without that traffic the
