@@ -43,8 +43,10 @@ function fanScreens(fans) {
   }));
 }
 
-// The effect that lights one part of the fan right now.
+// The effect that lights one part of the fan right now. Quick Sync wins
+// over the fan's own settings while the fan is in it.
 function partEffect(device, part) {
+  if (syncActive(device.id) && data.quickSync?.effect) return { ...data.quickSync.effect, sync: true };
   const regions = device.lighting?.regions || [];
   return regions.find((region) => region.effect.scope === part)?.effect
     || regions.find((region) => region.effect.scope === 'All')?.effect
@@ -54,7 +56,7 @@ function partEffect(device, part) {
 
 function effectLook(effect) {
   if (!effect || effect.mode === 'Off' || effect.disabled || effect.brightness === 255) return { colors: ['#2a2f38'], cls: 'fx-off', label: 'Off' };
-  const label = spaced(effect.mode);
+  const label = effect.sync ? `Quick Sync: ${spaced(effect.mode)}` : spaced(effect.mode);
   if (effect.mode === 'Rainbow' || effect.mode === 'RainbowMorph') return { colors: ['#ff3b3b', '#ffd23b', '#3bff6e', '#3bb8ff', '#b03bff'], cls: 'fx-rainbow', label };
   const colors = (effect.colors?.length ? effect.colors : [[255, 255, 255]]).map(hex);
   const cls = effect.mode === 'Static' || effect.mode === 'Direct' ? '' : effect.mode === 'Breathing' ? 'fx-breathe' : 'fx-move';
@@ -195,6 +197,7 @@ function fanEditor() {
   const colors = colorFree ? [] : draft.colors.slice(0, max);
   return `<div class="fan-editor">
     <div class="card-head"><h3>${esc(device.name)}: ${esc(FAN_PARTS[fanEdit.part].toLowerCase())}</h3></div>
+    ${syncActive(device.id) ? '<p class="fan-sync-warning">Quick Sync is on for this fan, so it shows the Quick Sync effect and ignores these settings. Turn Quick Sync off on the Lights page to use them.</p>' : ''}
     <label>Effect<select data-fan-e="mode">${modes.map((mode) => option(mode, spaced(mode), mode === draft.mode)).join('')}</select></label>
     ${colors.length ? `<div class="colors">${colors.map((color, index) => `<label>Colour ${index + 1}<input type="color" data-fan-color="${index}" value="${hex(color)}"></label>`).join('')}</div>
     ${max > 1 ? `<div class="row-actions" style="margin-top:6px">
