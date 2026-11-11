@@ -36,6 +36,7 @@ const defaults = () => ({
   lcdThemes: {},
   limits: { ...DEFAULT_LIMITS },
   names: {},
+  fanLayout: { order: [], perRow: 0 },
   snapshots: {},
   baseBrightness: {},
   lightsSnapshot: null,
