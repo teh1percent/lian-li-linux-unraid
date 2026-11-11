@@ -38,6 +38,9 @@ const SENSOR_DEFAULTS = {
 // Devices left in monitor firmware. They can only be sent back to LCD mode here,
 // because monitor mode needs a desktop session that a container doesn't have.
 const DESKTOP_FAMILIES = new Set(['HydroShift2LcdDesktop', 'Lancool207Desktop', 'UniversalScreenDesktop', 'Vision9p2Desktop']);
+// Uploading a startup image to a TL Flex screen left it unable to boot (it
+// dropped off USB until the startup selection was reset), so it isn't offered.
+const NO_STARTUP_IMAGE_FAMILIES = new Set(['TlFlexLcd']);
 const H264_FAMILIES = new Set(['HydroShiftLcd', 'Galahad2Lcd', 'HydroShift2Lcd', 'HydroShift2OledCurveLcd', 'UniversalScreen', 'TlFlexLcd', 'SlInfFlexLcd']);
 
 function jpegSize(buffer) {
@@ -346,6 +349,7 @@ function createScreens({ daemon, engine, store, options, findDevice, download = 
   async function uploadStartupImage(body) {
     const device = await findDevice(body.device_id);
     const limits = device.startup_image;
+    check(!NO_STARTUP_IMAGE_FAMILIES.has(device.family), 'Startup images are turned off for TL Flex screens, because one stopped a screen booting');
     check(limits, 'This screen has no startup image');
     check(typeof body.jpeg_base64 === 'string' && body.jpeg_base64, 'Choose an image');
     const jpeg = Buffer.from(body.jpeg_base64, 'base64');
@@ -414,7 +418,7 @@ function createScreens({ daemon, engine, store, options, findDevice, download = 
       family: device.family,
       screenWidth: device.screen_width ?? null,
       screenHeight: device.screen_height ?? null,
-      startupImage: device.startup_image || null,
+      startupImage: NO_STARTUP_IMAGE_FAMILIES.has(device.family) ? null : device.startup_image || null,
       desktopMode: DESKTOP_FAMILIES.has(device.family),
       h264: H264_FAMILIES.has(device.family),
       cCommand: device.supports_c_command === true,

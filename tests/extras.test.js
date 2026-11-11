@@ -999,10 +999,25 @@ test('a sensor gauge saves and previews', async () => {
 
 test('startup images must be a JPEG of exactly the right size', async () => {
   const device = mock.state.screens[0];
+  device.family = 'HydroShiftLcd';
   device.startup_image = { width: 400, height: 400, max_jpeg_bytes: 200000, jpeg_target_bytes: 150000 };
   const onePixel = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAA//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AN//Z';
   assert.strictEqual((await call('/api/startup-image', { device_id: SCREEN, jpeg_base64: onePixel })).status, 400);
   assert.strictEqual((await call('/api/startup-image', { device_id: SCREEN, jpeg_base64: 'bm90IGEganBlZw==' })).status, 400);
+  device.family = 'TlFlexLcd';
+});
+
+test('TL Flex screens are not offered startup images', async () => {
+  const device = mock.state.screens[0];
+  device.startup_image = { width: 400, height: 400, max_jpeg_bytes: 200000, jpeg_target_bytes: 150000 };
+  const state = await (await call('/api/state')).json();
+  const shown = JSON.stringify(state.devices.find((item) => item.id === SCREEN));
+  assert.ok(shown && !shown.includes('max_jpeg_bytes'), shown);
+  const response = await call('/api/startup-image', { device_id: SCREEN, jpeg_base64: 'bm90IGEganBlZw==' });
+  assert.strictEqual(response.status, 400);
+  assert.match(JSON.stringify(await response.json()), /TL Flex/);
+  assert.ok(!mock.state.calls.some((item) => item.method === 'UploadStartupImage'));
+  delete device.startup_image;
 });
 
 test('backups only restore with the checksum that was previewed', async () => {
