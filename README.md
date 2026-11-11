@@ -156,7 +156,7 @@ docker exec lian-li-linux sh -c 'grep . /run/lianli-stats/*'
 docker exec -u lianli lian-li-linux lianli-control diagnose-runtime
 ```
 
-**A TL Flex screen froze.** Turn the PSU off for 30 seconds to reset it; restarting the container is not enough. If it keeps freezing, the log line `Flex opening packet` shows whether the opening sequence ran. To turn parts of the fix off for testing, add these variables to the container: `LIANLI_FLEX_OPEN=0` (opening sequence), `LIANLI_FLEX_PNG_LAYER=0` (PNG layer before each frame), `LIANLI_FLEX_KEEPALIVE=0` (receiver keepalive), `LIANLI_FLEX_H264=1` (stream H.264 video again instead of still frames).
+**A TL Flex screen froze.** Turn the PSU off for 30 seconds to reset it; restarting the container is not enough. If it keeps freezing, the log line `Flex opening packet` shows whether the opening sequence ran. To turn parts of the fix off for testing, add these variables to the container: `LIANLI_FLEX_OPEN=0` (opening sequence), `LIANLI_FLEX_PNG_LAYER=0` (PNG layer before each frame), `LIANLI_FLEX_KEEPALIVE=0` (receiver keepalive), `LIANLI_FLEX_H264=1` (stream H.264 video again instead of still frames). If a TL Flex screen stops showing up on USB after a startup image upload, set `LIANLI_FLEX_RESTORE_STARTUP=1` and restart the container: each receiver logs its `startup selection`, and one whose screen slot has the built-in startup screen turned off gets it turned back on and its screen rebooted (`patches/wired-startup-restore.patch`). Remove the variable afterwards.
 
 **Read the logs:** go to the Docker tab, click the container's icon and choose **Logs**. The **System** page can also download a diagnostics report. Read it before sharing it.
 
