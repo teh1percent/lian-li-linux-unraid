@@ -10,9 +10,15 @@ let fanDragId = null;
 holds.push(() => tab === 'overview' && fanEdit !== null);
 holds.push(() => tab === 'overview' && fanDragId !== null);
 
-// LED positions of one TL fan (13 top, 13 bottom), from the daemon's TL renderer.
-const TL_TOP = [[0, 63], [13, 46], [27, 29], [44, 17], [61, 7], [77, 0], [94, 0], [111, 0], [127, 7], [144, 17], [161, 29], [173, 46], [187, 63]];
-const TL_BOTTOM = TL_TOP.map(([x, y]) => [x, 166 - y]);
+// A point on a circle round the middle of the 120 x 120 drawing. 0 degrees is
+// to the right and angles go clockwise, so 270 is straight up.
+function onRing(radius, angle) {
+  const rad = (angle * Math.PI) / 180;
+  return [60 + radius * Math.cos(rad), 60 + radius * Math.sin(rad)];
+}
+
+// The light bars are arcs along the top and bottom of the ring, like the real fan.
+const BAR_ARCS = { Top: [208, 332], Bottom: [28, 152] };
 const FAN_PARTS = { Top: 'Top lights', Bottom: 'Bottom lights' };
 
 // The USB hub a device hangs off, so a fan's receiver can be paired with its screen.
@@ -56,9 +62,19 @@ function effectLook(effect) {
   return { colors, cls, label, opacity };
 }
 
-function fanPoints(points) {
-  // Fit the 187 x 166 LED grid into the 120 x 120 drawing, centred.
-  return points.map(([x, y]) => `${(10 + x * 0.535).toFixed(1)},${(15.6 + y * 0.535).toFixed(1)}`).join(' ');
+function barPoints(part) {
+  const [from, to] = BAR_ARCS[part];
+  return Array.from({ length: 13 }, (_, step) => onRing(51.5, from + ((to - from) * step) / 12))
+    .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+}
+
+// Nine swept blades between the hub and the ring.
+function fanBlades() {
+  const at = (radius, angle) => onRing(radius, angle).map((value) => value.toFixed(1)).join(' ');
+  return Array.from({ length: 9 }, (_, blade) => {
+    const a = blade * 40;
+    return `<path class="fan-blade" d="M${at(27, a)} Q${at(41, a + 3)} ${at(47, a + 28)} L${at(47, a + 36)} Q${at(39, a + 20)} ${at(27, a + 17)} Z"/>`;
+  }).join('');
 }
 
 function lightBar(device, part, key) {
@@ -68,10 +84,17 @@ function lightBar(device, part, key) {
   const stops = look.colors.map((color, index) => `<stop offset="${look.colors.length > 1 ? (index / (look.colors.length - 1)) * 100 : 0}%" stop-color="${color}"/>`).join('');
   return `<linearGradient id="${gradient}" x1="0" x2="1" y1="0" y2="0">${stops}</linearGradient>
     <g class="fan-part ${look.cls}" role="button" tabindex="0" data-fan-part="${part}" data-fan-device="${esc(device.id)}" aria-label="${esc(FAN_PARTS[part])}: ${esc(look.label)}" style="opacity:${look.opacity ?? 1}">
-      <polyline class="fan-glow" points="${fanPoints(part === 'Top' ? TL_TOP : TL_BOTTOM)}" stroke="${stroke}"/>
-      <polyline class="fan-bar" points="${fanPoints(part === 'Top' ? TL_TOP : TL_BOTTOM)}" stroke="${stroke}"/>
+      <polyline class="fan-glow" points="${barPoints(part)}" stroke="${stroke}"/>
+      <polyline class="fan-bar" points="${barPoints(part)}" stroke="${stroke}"/>
       <title>${esc(FAN_PARTS[part])}: ${esc(look.label)}. Click to change.</title>
     </g>`;
+}
+
+// How far the picture on a screen looks turned in the case. A TL Flex panel
+// sits a quarter turn round in the fan, so its 90 degree setting reads upright.
+function shownTurn(lcd) {
+  const base = /Flex/i.test(lcd.model || '') ? 90 : 0;
+  return ((((lcd.orientation || 0) - base) % 360) + 360) % 360;
 }
 
 function screenFace(lcd, key) {
@@ -82,7 +105,8 @@ function screenFace(lcd, key) {
   if (screen?.kind === 'template') {
     const own = data.settings.lcdThemes[lcd.id];
     const theme = own ? `&theme=${encodeURIComponent(own)}` : '';
-    const rotate = lcd.orientation ? ` transform="rotate(${lcd.orientation} 60 60)"` : '';
+    const turn = shownTurn(lcd);
+    const rotate = turn ? ` transform="rotate(${turn} 60 60)"` : '';
     face = `<image href="/api/preview?id=${encodeURIComponent(screen.templateId)}${theme}" x="36" y="36" width="48" height="48" clip-path="url(#${clip})"${rotate}/>`;
   } else if (screen?.kind === 'color') {
     face = `<circle cx="60" cy="60" r="24" fill="${hex(screen.rgb)}"/>`;
@@ -117,7 +141,6 @@ function lightsLabel(device) {
 
 function fanPicture(device, lcd, index, last) {
   const key = `${index}`;
-  const blades = Array.from({ length: 9 }, (_, blade) => `<path class="fan-blade" d="M60 60 Q ${60 + 30 * Math.cos((blade * 40 + 20) * Math.PI / 180)} ${60 + 30 * Math.sin((blade * 40 + 20) * Math.PI / 180)} ${60 + 44 * Math.cos(blade * 40 * Math.PI / 180)} ${60 + 44 * Math.sin(blade * 40 * Math.PI / 180)}" />`).join('');
   const rpm = (device.rpms || []).filter((value) => value > 0);
   const selected = fanEdit?.device === device.id ? fanEdit.part : null;
   const moves = fanArrange ? `<div class="fan-move">
@@ -126,9 +149,10 @@ function fanPicture(device, lcd, index, last) {
     </div>` : '';
   return `<figure class="fan-figure${selected ? ' editing' : ''}${fanArrange ? ' arranging' : ''}" data-fan-card="${esc(device.id)}"${fanArrange ? ' draggable="true"' : ''}>
     <svg viewBox="0 0 120 120" class="fan-svg" role="group" aria-label="${esc(device.name)}">
-      <rect x="2" y="2" width="116" height="116" rx="14" class="fan-frame"/>
-      <circle cx="60" cy="60" r="48" class="fan-ring"/>
-      ${blades}
+      <rect x="2" y="2" width="116" height="116" rx="40" class="fan-frame"/>
+      <circle cx="60" cy="60" r="55" class="fan-ring"/>
+      <circle cx="60" cy="60" r="48" class="fan-throat"/>
+      ${fanBlades()}
       ${lightBar(device, 'Top', key)}
       ${lightBar(device, 'Bottom', key)}
       ${screenFace(lcd, key)}
@@ -209,7 +233,7 @@ function fanViewCard(devices) {
   const grid = perRow ? ` fixed${perRow >= 4 ? ' compact' : ''}" style="--per-row:${perRow}` : '';
   const button = fans.length > 1 || fanArrange
     ? `<button class="btn${fanArrange ? ' primary' : ''}" data-fan-arrange>${fanArrange ? 'Done' : 'Arrange'}</button>` : '';
-  const footer = fanArrange
+  const footer = fanArrange && !fanEdit
     ? `<div class="fan-arrange-bar"><label>Fans per row<select data-fan-per-row>${[0, 1, 2, 3, 4, 5, 6].map((count) => option(count, count || 'Fit to width', count === perRow)).join('')}</select></label>
       <p class="muted">Drag the fans, or use the arrows, to match the order in your case.</p></div>`
     : fanEditor() || '<p class="muted" style="margin-bottom:0">Click a light bar or a screen to change it.</p>';
@@ -320,7 +344,7 @@ view.addEventListener('click', (event) => {
     view.querySelector(`[data-fan-move="${fanMove}"][data-fan-id="${CSS.escape(fanId)}"]:not([disabled])`)?.focus();
     return;
   }
-  const part = !fanArrange && event.target.closest('[data-fan-part], [data-fan-screen]');
+  const part = event.target.closest('[data-fan-part], [data-fan-screen]');
   if (part) {
     if (part.dataset.fanPart) openFanPart(part.dataset.fanDevice, part.dataset.fanPart);
     else {
@@ -344,7 +368,7 @@ view.addEventListener('click', (event) => {
 });
 
 view.addEventListener('keydown', (event) => {
-  if (tab !== 'overview' || fanArrange || (event.key !== 'Enter' && event.key !== ' ')) return;
+  if (tab !== 'overview' || (event.key !== 'Enter' && event.key !== ' ')) return;
   if (!event.target.closest('[data-fan-part], [data-fan-screen]')) return;
   event.preventDefault();
   event.target.closest('[data-fan-part], [data-fan-screen]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
